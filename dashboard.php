@@ -24,6 +24,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+// Handle Delete Intern
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_intern') {
+    $id = (int)$_POST['id'];
+    $stmt = $pdo->prepare("DELETE FROM interns WHERE id = ?");
+    $stmt->execute([$id]);
+    header("Location: dashboard.php");
+    exit;
+}
+
 // Security check
 if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
     header("Location: login.php");
@@ -40,10 +49,30 @@ while ($row = $stmt->fetch()) {
     $stats['Total'] += $row['count'];
 }
 
-// Fetch all intern records
-$internsStmt = $pdo->query("SELECT * FROM interns ORDER BY created_at DESC");
-$interns = $internsStmt->fetchAll();
+// Handle Search and Filter Query
+$search = trim($_GET['search'] ?? '');
+$statusFilter = trim($_GET['status'] ?? '');
+
+$sql = "SELECT * FROM interns WHERE 1=1";
+$params = [];
+
+if (!empty($search)) {
+    $sql .= " AND (first_name LIKE ? OR last_name LIKE ? OR school LIKE ? OR department LIKE ?)";
+    $searchTerm = "%{$search}%";
+    $params = array_merge($params, [$searchTerm, $searchTerm, $searchTerm, $searchTerm]);
+}
+
+if (!empty($statusFilter) && in_array($statusFilter, ['Active', 'Completed', 'Upcoming'])) {
+    $sql .= " AND status = ?";
+    $params[] = $statusFilter;
+}
+
+$sql .= " ORDER BY created_at DESC";
+$internsStmt = $pdo->prepare($sql);
+$internsStmt->execute($params);
+$interns = $internsStmt->fetchAll(); 
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -81,18 +110,18 @@ $interns = $internsStmt->fetchAll();
             <div class="p-4">
                 <div class="text-[10px] font-bold tracking-widest text-blue-300 mb-3 px-3">NAVIGATION</div>
                 <nav class="space-y-1">
-                    <a href="#" class="flex items-center justify-between bg-blue-800/60 text-white px-3 py-2.5 rounded-md text-sm font-medium border border-blue-700/50">
+                    <a href="dashboard.php" class="flex items-center justify-between bg-blue-800/60 text-white px-3 py-2.5 rounded-md text-sm font-medium border border-blue-700/50">
                         <div class="flex items-center gap-3">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
                             Intern Records
                         </div>
                         <svg class="w-4 h-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
                     </a>
-                    <a href="#" class="flex items-center gap-3 text-blue-200 hover:bg-blue-800/40 px-3 py-2.5 rounded-md text-sm font-medium transition-colors">
+                    <a href="reports.php" class="flex items-center gap-3 text-blue-200 hover:bg-blue-800/40 px-3 py-2.5 rounded-md text-sm font-medium transition-colors">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                         Reports
                     </a>
-                    <a href="#" class="flex items-center gap-3 text-blue-200 hover:bg-blue-800/40 px-3 py-2.5 rounded-md text-sm font-medium transition-colors">
+                    <a href="settings.php" class="flex items-center gap-3 text-blue-200 hover:bg-blue-800/40 px-3 py-2.5 rounded-md text-sm font-medium transition-colors">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                         Settings
                     </a>
@@ -188,20 +217,23 @@ $interns = $internsStmt->fetchAll();
                 </div>
             </div>
 
-            <!-- Toolbar / Filters -->
+            <!-- Toolbar Section -->
+
             <div class="bg-white p-4 rounded-t-lg border-b border-gray-100 flex items-center justify-between shadow-sm">
-                <div class="flex gap-4 w-1/2">
-                    <input type="text" placeholder="Search name, school, department..." class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                    <input type="text" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-32 focus:outline-none">
-                </div>
+                <form method="GET" action="dashboard.php" class="flex gap-4 w-1/2">
+                    <?php if (!empty($statusFilter)): ?>
+                        <input type="hidden" name="status" value="<?php echo htmlspecialchars($statusFilter); ?>">
+                    <?php endif; ?>
+                    <input type="text" name="search" value="<?php echo htmlspecialchars($search); ?>" placeholder="Search name, school, department..." class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <button type="submit" class="bg-figmaBlue text-white px-4 py-2 text-xs font-bold rounded-md">Search</button>
+                </form>
                 <div class="flex items-center gap-4">
                     <div class="flex border border-gray-200 rounded-md overflow-hidden text-xs font-bold shadow-sm">
-                        <button class="bg-figmaBlue text-white px-4 py-2">ALL</button>
-                        <button class="bg-white text-gray-500 hover:bg-gray-50 px-4 py-2 border-l border-gray-200">ACTIVE</button>
-                        <button class="bg-white text-gray-500 hover:bg-gray-50 px-4 py-2 border-l border-gray-200">COMPLETED</button>
-                        <button class="bg-white text-gray-500 hover:bg-gray-50 px-4 py-2 border-l border-gray-200">UPCOMING</button>
+                        <a href="dashboard.php" class="px-4 py-2 <?php echo empty($statusFilter) ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">ALL</a>
+                        <a href="dashboard.php?status=Active" class="px-4 py-2 border-l border-gray-200 <?php echo $statusFilter === 'Active' ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">ACTIVE</a>
+                        <a href="dashboard.php?status=Completed" class="px-4 py-2 border-l border-gray-200 <?php echo $statusFilter === 'Completed' ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">COMPLETED</a>
+                        <a href="dashboard.php?status=Upcoming" class="px-4 py-2 border-l border-gray-200 <?php echo $statusFilter === 'Upcoming' ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">UPCOMING</a>
                     </div>
-                    <div class="text-xs text-gray-400 font-medium whitespace-nowrap"><?php echo $stats['Total']; ?> / <?php echo $stats['Total']; ?> records</div>
                 </div>
             </div>
 
@@ -217,6 +249,7 @@ $interns = $internsStmt->fetchAll();
                             <th class="p-5">End</th>
                             <th class="p-5">Graduation</th>
                             <th class="p-5">Status</th>
+                            <th class="p-5 text-right">Actions</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-100">
@@ -241,6 +274,13 @@ $interns = $internsStmt->fetchAll();
                                         <span class="bg-figmaBlue text-white text-[10px] font-bold px-3 py-1 rounded-full tracking-wider uppercase">
                                             <?php echo htmlspecialchars($intern['status']); ?>
                                         </span>
+                                    </td>
+                                    <td class="p-5 text-right">
+                                        <form method="POST" action="dashboard.php" onsubmit="return confirm('Are you sure you want to delete this intern?');" class="inline">
+                                            <input type="hidden" name="action" value="delete_intern">
+                                            <input type="hidden" name="id" value="<?php echo $intern['id']; ?>">
+                                            <button type="submit" class="text-red-500 hover:text-red-700 font-bold text-xs">Delete</button>
+                                        </form>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
