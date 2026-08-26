@@ -2,6 +2,28 @@
 session_start();
 require_once 'db.php';
 
+// Handle form submission to add new intern
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'add_intern') {
+    $firstName = trim($_POST['first_name']);
+    $lastName = trim($_POST['last_name']);
+    $course = trim($_POST['course']);
+    $school = trim($_POST['school']);
+    $department = trim($_POST['department']);
+    $startDate = !empty($_POST['start_date']) ? $_POST['start_date'] : null;
+    $endDate = !empty($_POST['end_date']) ? $_POST['end_date'] : null;
+    $gradDate = !empty($_POST['graduation_date']) ? $_POST['graduation_date'] : null;
+    $batchYear = !empty($_POST['batch_year']) ? (int)$_POST['batch_year'] : (int)date('Y');
+    $status = $_POST['status'] ?? 'Upcoming';
+
+    if (!empty($firstName) && !empty($lastName) && !empty($department)) {
+        $stmt = $pdo->prepare("INSERT INTO interns (first_name, last_name, course, school, department, start_date, end_date, graduation_date, batch_year, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$firstName, $lastName, $course, $school, $department, $startDate, $endDate, $gradDate, $batchYear, $status]);
+        
+        header("Location: dashboard.php");
+        exit;
+    }
+}
+
 // Security check
 if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
     header("Location: login.php");
@@ -117,8 +139,8 @@ $interns = $internsStmt->fetchAll();
                 <button class="h-10 w-10 rounded border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path></svg>
                 </button>
-                <button class="bg-[#0fb871] text-white px-5 py-2.5 rounded font-bold text-sm flex items-center gap-2 hover:bg-green-600 transition shadow-sm">
-                    <span>+</span> ADD INTERN
+                <button onclick="openModal()" class="bg-[#0fb871] text-white px-5 py-2.5 rounded font-bold text-sm flex items-center gap-2 hover:bg-green-600 transition shadow-sm">
+                <span>+</span> ADD INTERN
                 </button>
             </div>
         </header>
@@ -245,5 +267,90 @@ $interns = $internsStmt->fetchAll();
             
         </div>
     </main>
+
+    <!-- Modal Backdrop & Window -->
+<div id="addInternModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 relative overflow-y-auto max-h-[90vh]">
+        <div class="flex justify-between items-center border-b pb-3 mb-4">
+            <h3 class="text-lg font-bold text-gray-800">Add New Intern</h3>
+            <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
+        </div>
+
+        <form method="POST" action="dashboard.php" class="space-y-4">
+            <input type="hidden" name="action" value="add_intern">
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">FIRST NAME *</label>
+                    <input type="text" name="first_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">LAST NAME *</label>
+                    <input type="text" name="last_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">SCHOOL</label>
+                    <input type="text" name="school" placeholder="e.g. Stanford University" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">COURSE</label>
+                    <input type="text" name="course" placeholder="e.g. BS Computer Science" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">DEPARTMENT *</label>
+                    <input type="text" name="department" required placeholder="e.g. IT, HR" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">BATCH YEAR *</label>
+                    <input type="number" name="batch_year" value="2026" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">STATUS</label>
+                    <select name="status" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                        <option value="Upcoming">Upcoming</option>
+                        <option value="Active">Active</option>
+                        <option value="Completed">Completed</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">START DATE</label>
+                    <input type="date" name="start_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">END DATE</label>
+                    <input type="date" name="end_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">GRADUATION DATE</label>
+                    <input type="date" name="graduation_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
+                </div>
+            </div>
+
+            <div class="flex justify-end gap-3 border-t pt-4 mt-4">
+                <button type="button" onclick="closeModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
+                <button type="submit" class="px-4 py-2 bg-[#0fb871] text-white rounded text-xs font-bold hover:bg-green-600 transition">SAVE INTERN</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    function openModal() {
+        document.getElementById('addInternModal').classList.remove('hidden');
+    }
+    function closeModal() {
+        document.getElementById('addInternModal').classList.add('hidden');
+    }
+</script>
+
 </body>
 </html>
