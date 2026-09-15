@@ -24,6 +24,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+// Handle Edit Intern
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'edit_intern') {
+    $id = (int)$_POST['id'];
+    $firstName = trim($_POST['first_name']);
+    $lastName = trim($_POST['last_name']);
+    $course = trim($_POST['course']);
+    $school = trim($_POST['school']);
+    $department = trim($_POST['department']);
+    $startDate = !empty($_POST['start_date']) ? $_POST['start_date'] : null;
+    $endDate = !empty($_POST['end_date']) ? $_POST['end_date'] : null;
+    $gradDate = !empty($_POST['graduation_date']) ? $_POST['graduation_date'] : null;
+    $batchYear = !empty($_POST['batch_year']) ? (int)$_POST['batch_year'] : (int)date('Y');
+    $status = $_POST['status'] ?? 'Upcoming';
+
+    if (!empty($firstName) && !empty($lastName) && !empty($department)) {
+        $stmt = $pdo->prepare("UPDATE interns SET first_name=?, last_name=?, course=?, school=?, department=?, start_date=?, end_date=?, graduation_date=?, batch_year=?, status=? WHERE id=?");
+        $stmt->execute([$firstName, $lastName, $course, $school, $department, $startDate, $endDate, $gradDate, $batchYear, $status, $id]);
+        
+        header("Location: dashboard.php");
+        exit;
+    }
+}
+
 // Handle Delete Intern
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_intern') {
     $id = (int)$_POST['id'];
@@ -42,7 +65,7 @@ if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
 // Fetch stats dynamically
 $stats = ['Total' => 0, 'Active' => 0, 'Completed' => 0, 'Upcoming' => 0];
 $stmt = $pdo->query("SELECT status, COUNT(*) as count FROM interns GROUP BY status");
-while ($row = $stmt->fetch()) {
+while ($row = $stmt->fetch()) { 
     if (array_key_exists($row['status'], $stats)) {
         $stats[$row['status']] = $row['count'];
     }
@@ -276,11 +299,8 @@ $interns = $internsStmt->fetchAll();
                                         </span>
                                     </td>
                                     <td class="p-5 text-right">
-                                        <form method="POST" action="dashboard.php" onsubmit="return confirm('Are you sure you want to delete this intern?');" class="inline">
-                                            <input type="hidden" name="action" value="delete_intern">
-                                            <input type="hidden" name="id" value="<?php echo $intern['id']; ?>">
-                                            <button type="submit" class="text-red-500 hover:text-red-700 font-bold text-xs">Delete</button>
-                                        </form>
+                                        <button type="button" onclick="openEditModal(<?php echo htmlspecialchars(json_encode($intern), ENT_QUOTES, 'UTF-8'); ?>)" class="text-figmaBlue hover:text-blue-900 font-bold text-xs mr-3">Edit</button>
+                                        <button type="button" onclick="deleteIntern(<?php echo $intern['id']; ?>)" class="text-red-500 hover:text-red-700 font-bold text-xs">Delete</button>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -383,12 +403,119 @@ $interns = $internsStmt->fetchAll();
     </div>
 </div>
 
+<!-- Edit Intern Modal -->
+<div id="editInternModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 relative overflow-y-auto max-h-[90vh]">
+        <div class="flex justify-between items-center border-b pb-3 mb-4">
+            <h3 class="text-lg font-bold text-gray-800">Edit Intern</h3>
+            <button onclick="closeEditModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
+        </div>
+
+        <form method="POST" action="dashboard.php" class="space-y-4">
+            <input type="hidden" name="action" value="edit_intern">
+            <input type="hidden" name="id" id="edit_id">
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">FIRST NAME *</label>
+                    <input type="text" name="first_name" id="edit_first_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">LAST NAME *</label>
+                    <input type="text" name="last_name" id="edit_last_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">SCHOOL</label>
+                    <input type="text" name="school" id="edit_school" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">COURSE</label>
+                    <input type="text" name="course" id="edit_course" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">DEPARTMENT *</label>
+                    <input type="text" name="department" id="edit_department" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">BATCH YEAR *</label>
+                    <input type="number" name="batch_year" id="edit_batch_year" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">STATUS</label>
+                    <select name="status" id="edit_status" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                        <option value="Upcoming">Upcoming</option>
+                        <option value="Active">Active</option>
+                        <option value="Completed">Completed</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">START DATE</label>
+                    <input type="date" name="start_date" id="edit_start_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">END DATE</label>
+                    <input type="date" name="end_date" id="edit_end_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 mb-1">GRADUATION DATE</label>
+                    <input type="date" name="graduation_date" id="edit_graduation_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
+                </div>
+            </div>
+
+            <div class="flex justify-end gap-3 border-t pt-4 mt-4">
+                <button type="button" onclick="closeEditModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
+                <button type="submit" class="px-4 py-2 bg-figmaBlue text-white rounded text-xs font-bold hover:bg-blue-900 transition">UPDATE INTERN</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Hidden Delete Form (outside table to avoid browser stripping) -->
+<form id="deleteInternForm" method="POST" action="dashboard.php" class="hidden">
+    <input type="hidden" name="action" value="delete_intern">
+    <input type="hidden" name="id" id="delete_id">
+</form>
+
 <script>
     function openModal() {
         document.getElementById('addInternModal').classList.remove('hidden');
     }
     function closeModal() {
         document.getElementById('addInternModal').classList.add('hidden');
+    }
+
+    function openEditModal(intern) {
+        document.getElementById('edit_id').value = intern.id;
+        document.getElementById('edit_first_name').value = intern.first_name;
+        document.getElementById('edit_last_name').value = intern.last_name;
+        document.getElementById('edit_course').value = intern.course || '';
+        document.getElementById('edit_school').value = intern.school || '';
+        document.getElementById('edit_department').value = intern.department;
+        document.getElementById('edit_batch_year').value = intern.batch_year;
+        document.getElementById('edit_status').value = intern.status;
+        document.getElementById('edit_start_date').value = intern.start_date || '';
+        document.getElementById('edit_end_date').value = intern.end_date || '';
+        document.getElementById('edit_graduation_date').value = intern.graduation_date || '';
+        document.getElementById('editInternModal').classList.remove('hidden');
+    }
+    function closeEditModal() {
+        document.getElementById('editInternModal').classList.add('hidden');
+    }
+
+    function deleteIntern(id) {
+        if (confirm('Are you sure you want to delete this intern?')) {
+            document.getElementById('delete_id').value = id;
+            document.getElementById('deleteInternForm').submit();
+        }
     }
 </script>
 
