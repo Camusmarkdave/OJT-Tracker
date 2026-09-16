@@ -2,6 +2,12 @@
 session_start();
 require_once 'db.php';
 
+// Security check
+if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
+    header("Location: login.php");
+    exit;
+}
+
 // Handle form submission to add new intern
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'add_intern') {
     $firstName = trim($_POST['first_name']);
@@ -56,11 +62,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     exit;
 }
 
-// Security check
-if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
-    header("Location: login.php");
-    exit;
-}
 
 // Fetch stats dynamically
 $stats = ['Total' => 0, 'Active' => 0, 'Completed' => 0, 'Upcoming' => 0];
@@ -243,13 +244,9 @@ $interns = $internsStmt->fetchAll();
             <!-- Toolbar Section -->
 
             <div class="bg-white p-4 rounded-t-lg border-b border-gray-100 flex items-center justify-between shadow-sm">
-                <form method="GET" action="dashboard.php" class="flex gap-4 w-1/2">
-                    <?php if (!empty($statusFilter)): ?>
-                        <input type="hidden" name="status" value="<?php echo htmlspecialchars($statusFilter); ?>">
-                    <?php endif; ?>
-                    <input type="text" name="search" value="<?php echo htmlspecialchars($search); ?>" placeholder="Search name, school, department..." class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                    <button type="submit" class="bg-figmaBlue text-white px-4 py-2 text-xs font-bold rounded-md">Search</button>
-                </form>
+                <div class="flex gap-4 w-1/2">
+                    <input type="text" id="searchInput" placeholder="Search name, school, department..." class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                </div>
                 <div class="flex items-center gap-4">
                     <div class="flex border border-gray-200 rounded-md overflow-hidden text-xs font-bold shadow-sm">
                         <a href="dashboard.php" class="px-4 py-2 <?php echo empty($statusFilter) ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">ALL</a>
@@ -275,7 +272,7 @@ $interns = $internsStmt->fetchAll();
                             <th class="p-5 text-right">Actions</th>
                         </tr>
                     </thead>
-                    <tbody class="divide-y divide-gray-100">
+                    <tbody id="internTableBody" class="divide-y divide-gray-100">
                         <?php if (count($interns) > 0): ?>
                             <?php foreach ($interns as $intern): ?>
                                 <tr class="hover:bg-gray-50 transition">
@@ -316,11 +313,11 @@ $interns = $internsStmt->fetchAll();
                 
                 <!-- Pagination -->
                 <div class="p-5 border-t border-gray-100 flex items-center justify-between">
-                    <div class="text-xs text-gray-400">Showing <span class="font-bold text-gray-700"><?php echo $stats['Total']; ?></span> interns</div>
+                    <div class="text-xs text-gray-400" id="showingStats">Showing <span class="font-bold text-gray-700"><?php echo $stats['Total']; ?></span> interns</div>
                     <div class="flex gap-2">
-                        <button class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50">&larr; Prev</button>
-                        <button class="bg-figmaBlue text-white rounded px-3 py-1 text-xs font-bold">1</button>
-                        <button class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50">Next &rarr;</button>
+                        <button id="prevBtn" onclick="changePage(-1)" class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">&larr; Prev</button>
+                        <button id="pageIndicator" class="bg-figmaBlue text-white rounded px-3 py-1 text-xs font-bold">1</button>
+                        <button id="nextBtn" onclick="changePage(1)" class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">Next &rarr;</button>
                     </div>
                 </div>
             </div>
@@ -517,6 +514,63 @@ $interns = $internsStmt->fetchAll();
             document.getElementById('deleteInternForm').submit();
         }
     }
+
+    // Client-Side Pagination & Live Filtering
+    const rowsPerPage = 10;
+    let currentPage = 1;
+
+    function renderTable() {
+        const rows = Array.from(document.querySelectorAll('#internTableBody tr'));
+        const noFoundRow = rows.find(r => r.cells.length === 1);
+        if (noFoundRow) noFoundRow.style.display = 'none';
+
+        const searchTerm = document.getElementById('searchInput')?.value.toLowerCase() || '';
+        
+        const filteredRows = rows.filter(row => {
+            if (row.cells.length === 1) return false;
+            return row.textContent.toLowerCase().includes(searchTerm);
+        });
+
+        const totalPages = Math.ceil(filteredRows.length / rowsPerPage) || 1;
+        if (currentPage > totalPages) currentPage = totalPages;
+
+        const start = (currentPage - 1) * rowsPerPage;
+        const end = start + rowsPerPage;
+
+        rows.forEach(r => r.style.display = 'none');
+        filteredRows.slice(start, end).forEach(r => r.style.display = '');
+
+        if (filteredRows.length === 0 && noFoundRow) {
+            noFoundRow.style.display = '';
+        }
+
+        const pageIndicator = document.getElementById('pageIndicator');
+        if (pageIndicator) pageIndicator.textContent = currentPage + ' / ' + totalPages;
+        
+        const prevBtn = document.getElementById('prevBtn');
+        if (prevBtn) prevBtn.disabled = currentPage === 1;
+        
+        const nextBtn = document.getElementById('nextBtn');
+        if (nextBtn) nextBtn.disabled = currentPage === totalPages;
+        
+        const showingStats = document.getElementById('showingStats');
+        if (showingStats) {
+            showingStats.innerHTML = `Showing <span class="font-bold text-gray-700">${filteredRows.length}</span> interns`;
+        }
+    }
+
+    function changePage(delta) {
+        currentPage += delta;
+        renderTable();
+    }
+
+    document.getElementById('searchInput')?.addEventListener('input', function(e) {
+        currentPage = 1;
+        renderTable();
+    });
+
+    // Initialize on load
+    document.addEventListener('DOMContentLoaded', renderTable);
 </script>
 
 </body>

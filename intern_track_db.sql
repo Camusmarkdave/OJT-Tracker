@@ -38,7 +38,7 @@ CREATE TABLE `interns` (
   `end_date` date DEFAULT NULL,
   `graduation_date` date DEFAULT NULL,
   `batch_year` int(11) NOT NULL,
-  `status` varchar(20) DEFAULT 'Enrolled',
+  `status` varchar(20) DEFAULT 'Upcoming',
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
