@@ -1,16 +1,12 @@
--- phpMyAdmin SQL Dump
--- version 5.2.1
--- https://www.phpmyadmin.net/
+-- InternTrack database (updated)
 --
--- Host: 127.0.0.1
--- Generation Time: Aug 26, 2026 at 09:09 AM
--- Server version: 10.4.32-MariaDB
--- PHP Version: 8.0.30
+-- FRESH INSTALL ONLY: import this file in phpMyAdmin into an empty database.
+-- EXISTING INSTALL:   do NOT import it. Just replace the PHP files - db.php upgrades
+--                     your current database automatically and keeps all your records.
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
 SET time_zone = "+00:00";
-
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
 /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
@@ -26,6 +22,10 @@ SET time_zone = "+00:00";
 --
 -- Table structure for table `interns`
 --
+-- status:            'Active' or 'Completed'
+-- validation_status: 'Pending' (self-registered, waiting for admin), 'Approved' (accepted record), 'Rejected'
+-- submitted_via:     'admin' (added from the dashboard) or 'register' (self-registered)
+--
 
 CREATE TABLE `interns` (
   `id` int(11) NOT NULL,
@@ -36,10 +36,13 @@ CREATE TABLE `interns` (
   `department` varchar(50) NOT NULL,
   `start_date` date DEFAULT NULL,
   `end_date` date DEFAULT NULL,
-  `graduation_date` date DEFAULT NULL,
   `batch_year` int(11) NOT NULL,
-  `status` varchar(20) DEFAULT 'Upcoming',
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+  `status` varchar(20) NOT NULL DEFAULT 'Active',
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `validation_status` varchar(20) NOT NULL DEFAULT 'Approved',
+  `submitted_via` varchar(20) NOT NULL DEFAULT 'admin',
+  `rejection_reason` text DEFAULT NULL,
+  `validated_at` datetime DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
@@ -52,48 +55,82 @@ CREATE TABLE `users` (
   `id` int(11) NOT NULL,
   `username` varchar(50) NOT NULL,
   `password_hash` varchar(255) NOT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `display_name` varchar(100) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `users`
 --
 
-INSERT INTO `users` (`id`, `username`, `password_hash`, `created_at`) VALUES
-(1, 'hr.admin', '$2y$10$hDwcUjx6tO67oy8G61SSHOkyfYq0xNQdKqOi3e0eVd2rzJN08y8JS', '2026-08-26 06:55:57');
+INSERT INTO `users` (`id`, `username`, `password_hash`, `created_at`, `display_name`) VALUES
+(1, 'hr.admin', '$2y$10$hDwcUjx6tO67oy8G61SSHOkyfYq0xNQdKqOi3e0eVd2rzJN08y8JS', '2026-08-26 06:55:57', 'Admin User');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `settings`
+--
+
+CREATE TABLE `settings` (
+  `setting_key` varchar(50) NOT NULL,
+  `setting_value` text DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+INSERT INTO `settings` (`setting_key`, `setting_value`) VALUES
+('schema_version', '3'),
+('registration_open', '1');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `departments`
+--
+
+CREATE TABLE `departments` (
+  `id` int(11) NOT NULL,
+  `name` varchar(50) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+INSERT INTO `departments` (`id`, `name`) VALUES
+(1, 'Finance'),
+(2, 'HR'),
+(3, 'IT'),
+(4, 'Marketing'),
+(5, 'Operations'),
+(6, 'Sales');
 
 --
 -- Indexes for dumped tables
 --
 
---
--- Indexes for table `interns`
---
 ALTER TABLE `interns`
-  ADD PRIMARY KEY (`id`);
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `validation_status` (`validation_status`);
 
---
--- Indexes for table `users`
---
 ALTER TABLE `users`
   ADD PRIMARY KEY (`id`),
   ADD UNIQUE KEY `username` (`username`);
+
+ALTER TABLE `settings`
+  ADD PRIMARY KEY (`setting_key`);
+
+ALTER TABLE `departments`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `name` (`name`);
 
 --
 -- AUTO_INCREMENT for dumped tables
 --
 
---
--- AUTO_INCREMENT for table `interns`
---
 ALTER TABLE `interns`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
---
--- AUTO_INCREMENT for table `users`
---
 ALTER TABLE `users`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+
+ALTER TABLE `departments`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=7;
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;

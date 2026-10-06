@@ -5,8 +5,8 @@ require_once 'db.php'; // Include database connection
 $error_message = '';
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $username = trim($_POST['username']);
-    $password = trim($_POST['password']);
+    $username = trim($_POST['username'] ?? '');
+    $password = trim($_POST['password'] ?? '');
 
     if (!empty($username) && !empty($password)) {
         // Prepare statement to prevent SQL injection
@@ -16,10 +16,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 
         // Verify password (assuming you used password_hash() when creating users)
         if ($user && password_verify($password, $user['password_hash'])) {
+            session_regenerate_id(true);
             $_SESSION['loggedin'] = true;
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['username'] = $username;
-            
+
             header("Location: dashboard.php");
             exit;
         } else {
@@ -35,7 +36,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>InternTrack - Login</title>
+    <title><?php echo e(APP_NAME); ?> - Login</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -49,7 +50,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 </head>
 <body class="flex min-h-screen w-full items-center justify-center bg-gray-900 p-4 font-sans">
   <div class="flex w-full max-w-[1257px] min-h-[687px] flex-col overflow-hidden bg-white shadow-2xl md:flex-row">
-    
+
     <!-- Left Side: Branding -->
     <div class="relative flex w-full flex-col bg-figmaBlue p-10 text-white md:w-1/2 md:p-14 overflow-hidden">
       <div class="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-white opacity-5"></div>
@@ -61,7 +62,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             <path d="M12 3L1 9l4 2.18v6L12 21l7-3.82v-6l2-1.09V17h2V9L12 3zm6.82 6L12 12.72 5.18 9 12 5.28 18.82 9zM17 15.99l-5 2.73-5-2.73v-3.72L12 15l5-2.73v3.72z"/>
           </svg>
         </div>
-        <span class="text-sm font-bold tracking-widest text-white">INTERNTRACK</span>
+        <span class="text-sm font-bold uppercase tracking-widest text-white"><?php echo e(APP_NAME); ?></span>
       </div>
 
       <div class="z-10 flex-grow">
@@ -107,11 +108,20 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
           </button>
         </form>
 
+        <!-- New OJTs: the only public entry point to the Register page -->
+        <div class="mt-8 flex items-center justify-between gap-4 rounded border border-gray-200 bg-white p-4">
+          <div class="text-sm text-gray-600">
+            <div class="font-bold text-figmaDark">New OJT / intern?</div>
+            Submit your own details for HR to validate.
+          </div>
+          <a href="register.php" class="shrink-0 rounded border-2 border-figmaBlue px-4 py-2 text-xs font-bold text-figmaBlue transition hover:bg-figmaBlue hover:text-white">REGISTER</a>
+        </div>
+
         <div class="mt-6 text-sm text-gray-500">
           Access issues? <a href="#" class="font-bold text-figmaBlue hover:underline">Contact IT Support</a>
         </div>
       </div>
-      <div class="mt-16 text-xs text-gray-400">&copy; 2025 InternTrack System — Confidential</div>
+      <div class="mt-16 text-xs text-gray-400">&copy; 2025 <?php echo e(APP_NAME); ?> System — Confidential</div>
     </div>
   </div>
 </body>

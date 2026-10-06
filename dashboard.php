@@ -1,187 +1,95 @@
 <?php
 session_start();
 require_once 'db.php';
+require_login(); // Security check
 
-// Security check
-if (!isset($_SESSION['loggedin']) || $_SESSION['loggedin'] !== true) {
-    header("Location: login.php");
-    exit;
-}
+$addErrors = [];
+$editErrors = [];
+$old = [];
+$openModal = '';
 
-// Handle form submission to add new intern
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'add_intern') {
-    $firstName = trim($_POST['first_name']);
-    $lastName = trim($_POST['last_name']);
-    $course = trim($_POST['course']);
-    $school = trim($_POST['school']);
-    $department = trim($_POST['department']);
-    $startDate = !empty($_POST['start_date']) ? $_POST['start_date'] : null;
-    $endDate = !empty($_POST['end_date']) ? $_POST['end_date'] : null;
-    $gradDate = !empty($_POST['graduation_date']) ? $_POST['graduation_date'] : null;
-    $batchYear = !empty($_POST['batch_year']) ? (int)$_POST['batch_year'] : (int)date('Y');
-    $status = $_POST['status'] ?? 'Upcoming';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_verify();
+    $action = $_POST['action'] ?? '';
 
-    if (!empty($firstName) && !empty($lastName) && !empty($department)) {
-        $stmt = $pdo->prepare("INSERT INTO interns (first_name, last_name, course, school, department, start_date, end_date, graduation_date, batch_year, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$firstName, $lastName, $course, $school, $department, $startDate, $endDate, $gradDate, $batchYear, $status]);
-        
-        header("Location: dashboard.php");
-        exit;
+    // Add intern (added by an admin, so the record is accepted right away)
+    if ($action === 'add_intern') {
+        $old = clean_intern_input($_POST);
+        $addErrors = validate_intern($old);
+        if (!$addErrors) {
+            insert_intern($pdo, $old, 'Approved', 'admin');
+            flash('success', $old['first_name'] . ' ' . $old['last_name'] . ' was added.');
+            redirect('dashboard.php');
+        }
+        $openModal = 'add';
+
+    // Edit intern
+    } elseif ($action === 'edit_intern') {
+        $old = clean_intern_input($_POST);
+        $old['id'] = (int)($_POST['id'] ?? 0);
+        $editErrors = validate_intern($old);
+        if (!$editErrors) {
+            update_intern($pdo, $old['id'], $old);
+            flash('success', $old['first_name'] . ' ' . $old['last_name'] . ' was updated.');
+            redirect('dashboard.php');
+        }
+        $openModal = 'edit';
+
+    // Delete intern
+    } elseif ($action === 'delete_intern') {
+        $pdo->prepare("DELETE FROM interns WHERE id = ?")->execute([(int)($_POST['id'] ?? 0)]);
+        flash('success', 'Intern record deleted.');
+        redirect('dashboard.php');
     }
 }
 
-// Handle Edit Intern
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'edit_intern') {
-    $id = (int)$_POST['id'];
-    $firstName = trim($_POST['first_name']);
-    $lastName = trim($_POST['last_name']);
-    $course = trim($_POST['course']);
-    $school = trim($_POST['school']);
-    $department = trim($_POST['department']);
-    $startDate = !empty($_POST['start_date']) ? $_POST['start_date'] : null;
-    $endDate = !empty($_POST['end_date']) ? $_POST['end_date'] : null;
-    $gradDate = !empty($_POST['graduation_date']) ? $_POST['graduation_date'] : null;
-    $batchYear = !empty($_POST['batch_year']) ? (int)$_POST['batch_year'] : (int)date('Y');
-    $status = $_POST['status'] ?? 'Upcoming';
-
-    if (!empty($firstName) && !empty($lastName) && !empty($department)) {
-        $stmt = $pdo->prepare("UPDATE interns SET first_name=?, last_name=?, course=?, school=?, department=?, start_date=?, end_date=?, graduation_date=?, batch_year=?, status=? WHERE id=?");
-        $stmt->execute([$firstName, $lastName, $course, $school, $department, $startDate, $endDate, $gradDate, $batchYear, $status, $id]);
-        
-        header("Location: dashboard.php");
-        exit;
-    }
-}
-
-// Handle Delete Intern
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_intern') {
-    $id = (int)$_POST['id'];
-    $stmt = $pdo->prepare("DELETE FROM interns WHERE id = ?");
-    $stmt->execute([$id]);
-    header("Location: dashboard.php");
-    exit;
-}
-
-
-// Fetch stats dynamically
-$stats = ['Total' => 0, 'Active' => 0, 'Completed' => 0, 'Upcoming' => 0];
-$stmt = $pdo->query("SELECT status, COUNT(*) as count FROM interns GROUP BY status");
-while ($row = $stmt->fetch()) { 
+// Stats (accepted records only - pending/rejected submissions are handled on the Validation page)
+$stats = ['Total' => 0, 'Active' => 0, 'Completed' => 0];
+$stmt = $pdo->query("SELECT status, COUNT(*) as count FROM interns WHERE validation_status='Approved' GROUP BY status");
+while ($row = $stmt->fetch()) {
     if (array_key_exists($row['status'], $stats)) {
-        $stats[$row['status']] = $row['count'];
+        $stats[$row['status']] = (int)$row['count'];
     }
-    $stats['Total'] += $row['count'];
+    $stats['Total'] += (int)$row['count'];
 }
 
-// Handle Search and Filter Query
-$search = trim($_GET['search'] ?? '');
+// Search + status + school filters
+$search       = trim($_GET['search'] ?? '');
 $statusFilter = trim($_GET['status'] ?? '');
+$schoolFilter = trim($_GET['school'] ?? '');
+if (!in_array($statusFilter, STATUSES, true)) { $statusFilter = ''; }
+$schools = get_schools($pdo); // schools entered through + Add Intern (and approved registrations)
 
-$sql = "SELECT * FROM interns WHERE 1=1";
+$sql = "SELECT * FROM interns WHERE validation_status='Approved'";
 $params = [];
 
-if (!empty($search)) {
+if ($search !== '') {
     $sql .= " AND (first_name LIKE ? OR last_name LIKE ? OR school LIKE ? OR department LIKE ?)";
-    $searchTerm = "%{$search}%";
-    $params = array_merge($params, [$searchTerm, $searchTerm, $searchTerm, $searchTerm]);
+    $term = "%{$search}%";
+    array_push($params, $term, $term, $term, $term);
 }
-
-if (!empty($statusFilter) && in_array($statusFilter, ['Active', 'Completed', 'Upcoming'])) {
+if ($statusFilter !== '') {
     $sql .= " AND status = ?";
     $params[] = $statusFilter;
 }
-
-$sql .= " ORDER BY created_at DESC";
+if ($schoolFilter !== '') {
+    $sql .= " AND school = ?";
+    $params[] = $schoolFilter;
+}
+$sql .= " ORDER BY created_at DESC, id DESC";
 $internsStmt = $pdo->prepare($sql);
 $internsStmt->execute($params);
-$interns = $internsStmt->fetchAll(); 
+$interns = $internsStmt->fetchAll();
+
+// Keeps the school + search filters when switching the status tabs
+$tabLink = fn($status) => 'dashboard.php' . (($q = http_build_query(array_filter(['status' => $status, 'school' => $schoolFilter, 'search' => $search]))) ? "?$q" : '');
+$tabCls  = fn($on) => $on ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50';
+$pending = pending_count($pdo);
+$filtered = ($search !== '' || $schoolFilter !== '' || $statusFilter !== '');
+
+page_start($pdo, 'Dashboard', 'dashboard');
 ?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>InternTrack - Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: { figmaBg: '#F5F6F8', figmaBlue: '#15458A', figmaYellow: '#FDDB31' }
-                }
-            }
-        }
-    </script>
-</head>
-<body class="flex h-screen bg-figmaBg font-sans overflow-hidden">
-
-    <!-- Sidebar -->
-    <aside class="w-64 bg-figmaBlue text-white flex flex-col justify-between shadow-xl z-20 relative">
-        <div>
-            <!-- Sidebar Header -->
-            <div class="p-6 flex items-center gap-3 border-b border-blue-800/50">
-                <div class="flex h-10 w-10 items-center justify-center rounded bg-figmaYellow text-figmaBlue shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 3L1 9l4 2.18v6L12 21l7-3.82v-6l2-1.09V17h2V9L12 3z"/></svg>
-                </div>
-                <div>
-                    <h1 class="text-sm font-bold tracking-widest leading-tight">INTERNTRACK</h1>
-                    <span class="text-[10px] text-blue-200">Records System</span>
-                </div>
-            </div>
-
-            <!-- Navigation -->
-            <div class="p-4">
-                <div class="text-[10px] font-bold tracking-widest text-blue-300 mb-3 px-3">NAVIGATION</div>
-                <nav class="space-y-1">
-                    <a href="dashboard.php" class="flex items-center justify-between bg-blue-800/60 text-white px-3 py-2.5 rounded-md text-sm font-medium border border-blue-700/50">
-                        <div class="flex items-center gap-3">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
-                            Intern Records
-                        </div>
-                        <svg class="w-4 h-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
-                    </a>
-                    <a href="reports.php" class="flex items-center gap-3 text-blue-200 hover:bg-blue-800/40 px-3 py-2.5 rounded-md text-sm font-medium transition-colors">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                        Reports
-                    </a>
-                    <a href="settings.php" class="flex items-center gap-3 text-blue-200 hover:bg-blue-800/40 px-3 py-2.5 rounded-md text-sm font-medium transition-colors">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                        Settings
-                    </a>
-                </nav>
-            </div>
-        </div>
-
-        <!-- Sidebar Footer -->
-        <div>
-            <div class="px-6 py-4 space-y-3 border-t border-blue-800/50">
-                <div class="flex justify-between text-xs text-blue-200">
-                    <span>Active</span><span class="bg-green-500/20 text-green-400 px-2 py-0.5 rounded font-bold"><?php echo $stats['Active']; ?></span>
-                </div>
-                <div class="flex justify-between text-xs text-blue-200">
-                    <span>Upcoming</span><span class="bg-figmaYellow/20 text-figmaYellow px-2 py-0.5 rounded font-bold"><?php echo $stats['Upcoming']; ?></span>
-                </div>
-            </div>
-            
-            <div class="p-4 border-t border-blue-800/50 flex items-center justify-between bg-blue-900/30">
-                <div class="flex items-center gap-3">
-                    <div class="h-9 w-9 rounded bg-figmaYellow flex items-center justify-center text-figmaBlue font-bold text-sm">AD</div>
-                    <div class="leading-tight">
-                        <div class="text-sm font-bold text-white">Admin User</div>
-                        <div class="text-[10px] text-blue-200">HR Department</div>
-                    </div>
-                </div>
-                <a href="logout.php" class="text-blue-300 hover:text-white transition">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-                </a>
-            </div>
-        </div>
-    </aside>
-
-    <!-- Main Content -->
-    <main class="flex-1 flex flex-col h-screen overflow-hidden">
-        
         <!-- Header -->
         <header class="h-20 bg-white px-8 flex justify-between items-center border-b-2 border-blue-400 shadow-sm shrink-0">
             <div>
@@ -189,9 +97,10 @@ $interns = $internsStmt->fetchAll();
                 <h2 class="text-2xl font-black uppercase text-gray-900 tracking-tight">INTERN RECORDS</h2>
             </div>
             <div class="flex items-center gap-4">
-                <button class="h-10 w-10 rounded border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50">
+                <a href="validation.php" title="<?php echo $pending; ?> record(s) waiting for validation" class="relative h-10 w-10 rounded border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path></svg>
-                </button>
+                    <?php if ($pending > 0): ?><span class="absolute -right-1.5 -top-1.5 min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-black leading-[18px] text-white"><?php echo $pending; ?></span><?php endif; ?>
+                </a>
                 <button onclick="openModal()" class="bg-[#0fb871] text-white px-5 py-2.5 rounded font-bold text-sm flex items-center gap-2 hover:bg-green-600 transition shadow-sm">
                 <span>+</span> ADD INTERN
                 </button>
@@ -200,9 +109,18 @@ $interns = $internsStmt->fetchAll();
 
         <!-- Scrollable Body -->
         <div class="p-8 overflow-y-auto flex-1">
-            
+
+            <?php echo flash_html(); ?>
+
+            <?php if ($pending > 0): ?>
+                <a href="validation.php" class="mb-6 flex items-center justify-between rounded-lg border border-yellow-300 bg-yellow-50 px-5 py-3 text-sm text-yellow-800 hover:bg-yellow-100">
+                    <span><b><?php echo $pending; ?></b> self-registered intern<?php echo $pending === 1 ? '' : 's'; ?> waiting for your validation.</span>
+                    <span class="font-bold">Review now &rarr;</span>
+                </a>
+            <?php endif; ?>
+
             <!-- Stats Grid -->
-            <div class="grid grid-cols-4 gap-6 mb-8">
+            <div class="grid grid-cols-3 gap-6 mb-8">
                 <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-figmaBlue flex items-center gap-4">
                     <div class="h-12 w-12 rounded bg-blue-50 text-figmaBlue flex items-center justify-center shrink-0">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
@@ -230,29 +148,28 @@ $interns = $internsStmt->fetchAll();
                         <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1">Completed</div>
                     </div>
                 </div>
-                <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-figmaYellow flex items-center gap-4">
-                    <div class="h-12 w-12 rounded bg-yellow-50 text-yellow-600 flex items-center justify-center shrink-0">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                    </div>
-                    <div>
-                        <div class="text-3xl font-black text-gray-800 leading-none"><?php echo $stats['Upcoming']; ?></div>
-                        <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1">Upcoming</div>
-                    </div>
-                </div>
             </div>
 
-            <!-- Toolbar Section -->
-
-            <div class="bg-white p-4 rounded-t-lg border-b border-gray-100 flex items-center justify-between shadow-sm">
-                <div class="flex gap-4 w-1/2">
-                    <input type="text" id="searchInput" placeholder="Search name, school, department..." class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
+            <!-- Toolbar Section: search + school filter + status tabs -->
+            <div class="bg-white p-4 rounded-t-lg border-b border-gray-100 flex items-center justify-between gap-4 shadow-sm">
+                <form method="GET" action="dashboard.php" class="flex flex-1 items-center gap-3">
+                    <?php if ($statusFilter !== ''): ?><input type="hidden" name="status" value="<?php echo e($statusFilter); ?>"><?php endif; ?>
+                    <input type="text" id="searchInput" name="search" value="<?php echo e($search); ?>" placeholder="Search name, school, department..." onkeydown="if(event.key==='Enter')event.preventDefault()" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full max-w-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <select name="school" onchange="this.form.submit()" title="Filter by school" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-3 py-2 max-w-[240px] focus:outline-none focus:ring-1 focus:ring-figmaBlue <?php echo $schoolFilter !== '' ? 'border-figmaBlue font-bold text-figmaBlue' : 'text-gray-600'; ?>">
+                        <option value="">All schools (<?php echo count($schools); ?>)</option>
+                        <?php foreach ($schools as $s): ?>
+                            <option value="<?php echo e($s); ?>" <?php echo strcasecmp($schoolFilter, $s) === 0 ? 'selected' : ''; ?>><?php echo e($s); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <?php if ($filtered): ?>
+                        <a href="dashboard.php" class="whitespace-nowrap text-xs font-bold text-red-500 hover:text-red-700">&times; Clear filters</a>
+                    <?php endif; ?>
+                </form>
                 <div class="flex items-center gap-4">
                     <div class="flex border border-gray-200 rounded-md overflow-hidden text-xs font-bold shadow-sm">
-                        <a href="dashboard.php" class="px-4 py-2 <?php echo empty($statusFilter) ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">ALL</a>
-                        <a href="dashboard.php?status=Active" class="px-4 py-2 border-l border-gray-200 <?php echo $statusFilter === 'Active' ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">ACTIVE</a>
-                        <a href="dashboard.php?status=Completed" class="px-4 py-2 border-l border-gray-200 <?php echo $statusFilter === 'Completed' ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">COMPLETED</a>
-                        <a href="dashboard.php?status=Upcoming" class="px-4 py-2 border-l border-gray-200 <?php echo $statusFilter === 'Upcoming' ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50'; ?>">UPCOMING</a>
+                        <a href="<?php echo e($tabLink('')); ?>" class="px-4 py-2 <?php echo $tabCls($statusFilter === ''); ?>">ALL</a>
+                        <a href="<?php echo e($tabLink('Active')); ?>" class="px-4 py-2 border-l border-gray-200 <?php echo $tabCls($statusFilter === 'Active'); ?>">ACTIVE</a>
+                        <a href="<?php echo e($tabLink('Completed')); ?>" class="px-4 py-2 border-l border-gray-200 <?php echo $tabCls($statusFilter === 'Completed'); ?>">COMPLETED</a>
                     </div>
                 </div>
             </div>
@@ -267,53 +184,57 @@ $interns = $internsStmt->fetchAll();
                             <th class="p-5">Department</th>
                             <th class="p-5">Start</th>
                             <th class="p-5">End</th>
-                            <th class="p-5">Graduation</th>
                             <th class="p-5">Status</th>
                             <th class="p-5 text-right">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="internTableBody" class="divide-y divide-gray-100">
                         <?php if (count($interns) > 0): ?>
-                            <?php foreach ($interns as $intern): ?>
+                            <?php foreach ($interns as $intern): $fullName = $intern['first_name'] . ' ' . $intern['last_name']; ?>
                                 <tr class="hover:bg-gray-50 transition">
                                     <td class="p-5 flex items-center gap-4">
                                         <div class="h-10 w-10 rounded-md bg-figmaBlue text-white flex items-center justify-center font-bold text-sm">
-                                            <?php echo strtoupper(substr($intern['first_name'], 0, 1) . substr($intern['last_name'], 0, 1)); ?>
+                                            <?php echo e(strtoupper(mb_substr($intern['first_name'], 0, 1) . mb_substr($intern['last_name'], 0, 1))); ?>
                                         </div>
                                         <div>
-                                            <div class="text-sm font-bold text-gray-900"><?php echo htmlspecialchars($intern['first_name'] . ' ' . $intern['last_name']); ?></div>
-                                            <div class="text-xs text-gray-400"><?php echo htmlspecialchars($intern['course'] ?? 'N/A'); ?></div>
+                                            <div class="text-sm font-bold text-gray-900"><?php echo e($fullName); ?></div>
+                                            <div class="text-xs text-gray-400"><?php echo e($intern['course'] ?: 'N/A'); ?></div>
                                         </div>
                                     </td>
-                                    <td class="p-5 text-sm text-gray-600"><?php echo htmlspecialchars($intern['school']); ?></td>
-                                    <td class="p-5 text-sm text-gray-600"><?php echo htmlspecialchars($intern['department']); ?></td>
-                                    <td class="p-5 text-sm text-gray-600"><?php echo empty($intern['start_date']) ? '-' : date('M j, Y', strtotime($intern['start_date'])); ?></td>
-                                    <td class="p-5 text-sm text-gray-600"><?php echo empty($intern['end_date']) ? '-' : date('M j, Y', strtotime($intern['end_date'])); ?></td>
-                                    <td class="p-5 text-sm text-gray-600"><?php echo empty($intern['graduation_date']) ? '-' : date('M j, Y', strtotime($intern['graduation_date'])); ?></td>
+                                    <td class="p-5 text-sm text-gray-600"><?php echo e($intern['school']); ?></td>
+                                    <td class="p-5 text-sm text-gray-600"><?php echo e($intern['department']); ?></td>
+                                    <td class="p-5 text-sm text-gray-600"><?php echo fmt_date($intern['start_date']); ?></td>
+                                    <td class="p-5 text-sm text-gray-600"><?php echo fmt_date($intern['end_date']); ?></td>
+                                    <td class="p-5"><?php echo status_badge((string)$intern['status']); ?></td>
                                     <td class="p-5">
-                                        <span class="bg-figmaBlue text-white text-[10px] font-bold px-3 py-1 rounded-full tracking-wider uppercase">
-                                            <?php echo htmlspecialchars($intern['status']); ?>
-                                        </span>
-                                    </td>
-                                    <td class="p-5 text-right">
-                                        <button type="button" onclick="openEditModal(<?php echo htmlspecialchars(json_encode($intern), ENT_QUOTES, 'UTF-8'); ?>)" class="text-figmaBlue hover:text-blue-900 font-bold text-xs mr-3">Edit</button>
-                                        <button type="button" onclick="deleteIntern(<?php echo $intern['id']; ?>)" class="text-red-500 hover:text-red-700 font-bold text-xs">Delete</button>
+                                        <div class="flex items-center justify-end gap-2">
+                                            <button type="button" onclick="openEditModal(<?php echo e(json_encode($intern)); ?>)" title="Edit <?php echo e($fullName); ?>" aria-label="Edit <?php echo e($fullName); ?>"
+                                                class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-figmaBlue shadow-sm transition hover:border-figmaBlue hover:bg-figmaBlue hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-figmaBlue focus-visible:ring-offset-1">
+                                                <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                                Edit
+                                            </button>
+                                            <button type="button" onclick="deleteIntern(<?php echo (int)$intern['id']; ?>, <?php echo e(json_encode($fullName)); ?>)" title="Delete <?php echo e($fullName); ?>" aria-label="Delete <?php echo e($fullName); ?>"
+                                                class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-sm transition hover:border-red-600 hover:bg-red-600 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-1">
+                                                <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                                Delete
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
                                 <td colspan="7" class="p-10 text-center text-sm text-gray-400">
-                                    No interns found. Click "+ ADD INTERN" to get started.
+                                    <?php echo $filtered ? 'No interns match your filters.' : 'No interns found. Click "+ ADD INTERN" to get started.'; ?>
                                 </td>
                             </tr>
                         <?php endif; ?>
                     </tbody>
                 </table>
-                
+
                 <!-- Pagination -->
                 <div class="p-5 border-t border-gray-100 flex items-center justify-between">
-                    <div class="text-xs text-gray-400" id="showingStats">Showing <span class="font-bold text-gray-700"><?php echo $stats['Total']; ?></span> interns</div>
+                    <div class="text-xs text-gray-400" id="showingStats">Showing <span class="font-bold text-gray-700"><?php echo count($interns); ?></span> interns</div>
                     <div class="flex gap-2">
                         <button id="prevBtn" onclick="changePage(-1)" class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">&larr; Prev</button>
                         <button id="pageIndicator" class="bg-figmaBlue text-white rounded px-3 py-1 text-xs font-bold">1</button>
@@ -321,76 +242,23 @@ $interns = $internsStmt->fetchAll();
                     </div>
                 </div>
             </div>
-            
+
         </div>
     </main>
 
-    <!-- Modal Backdrop & Window -->
-<div id="addInternModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
+<!-- Add Intern Modal -->
+<div id="addInternModal" data-modal class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 relative overflow-y-auto max-h-[90vh]">
         <div class="flex justify-between items-center border-b pb-3 mb-4">
             <h3 class="text-lg font-bold text-gray-800">Add New Intern</h3>
             <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
         </div>
 
-        <form method="POST" action="dashboard.php" class="space-y-4">
+        <form method="POST" action="dashboard.php" <?php echo form_attrs(); ?> class="space-y-4">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="add_intern">
 
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">FIRST NAME *</label>
-                    <input type="text" name="first_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">LAST NAME *</label>
-                    <input type="text" name="last_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">SCHOOL</label>
-                    <input type="text" name="school" placeholder="e.g. Stanford University" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">COURSE</label>
-                    <input type="text" name="course" placeholder="e.g. BS Computer Science" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-            </div>
-
-            <div class="grid grid-cols-3 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">DEPARTMENT *</label>
-                    <input type="text" name="department" required placeholder="e.g. IT, HR" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">BATCH YEAR *</label>
-                    <input type="number" name="batch_year" value="2026" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">STATUS</label>
-                    <select name="status" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                        <option value="Upcoming">Upcoming</option>
-                        <option value="Active">Active</option>
-                        <option value="Completed">Completed</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-3 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">START DATE</label>
-                    <input type="date" name="start_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">END DATE</label>
-                    <input type="date" name="end_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">GRADUATION DATE</label>
-                    <input type="date" name="graduation_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
-                </div>
-            </div>
+            <?php intern_fields($pdo, 'add_', $openModal === 'add' ? $old : [], ['errors' => $addErrors]); ?>
 
             <div class="flex justify-end gap-3 border-t pt-4 mt-4">
                 <button type="button" onclick="closeModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
@@ -401,72 +269,19 @@ $interns = $internsStmt->fetchAll();
 </div>
 
 <!-- Edit Intern Modal -->
-<div id="editInternModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
+<div id="editInternModal" data-modal class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 relative overflow-y-auto max-h-[90vh]">
         <div class="flex justify-between items-center border-b pb-3 mb-4">
             <h3 class="text-lg font-bold text-gray-800">Edit Intern</h3>
             <button onclick="closeEditModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
         </div>
 
-        <form method="POST" action="dashboard.php" class="space-y-4">
+        <form method="POST" action="dashboard.php" <?php echo form_attrs(); ?> class="space-y-4">
+            <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="edit_intern">
             <input type="hidden" name="id" id="edit_id">
 
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">FIRST NAME *</label>
-                    <input type="text" name="first_name" id="edit_first_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">LAST NAME *</label>
-                    <input type="text" name="last_name" id="edit_last_name" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">SCHOOL</label>
-                    <input type="text" name="school" id="edit_school" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">COURSE</label>
-                    <input type="text" name="course" id="edit_course" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-            </div>
-
-            <div class="grid grid-cols-3 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">DEPARTMENT *</label>
-                    <input type="text" name="department" id="edit_department" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">BATCH YEAR *</label>
-                    <input type="number" name="batch_year" id="edit_batch_year" required class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">STATUS</label>
-                    <select name="status" id="edit_status" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                        <option value="Upcoming">Upcoming</option>
-                        <option value="Active">Active</option>
-                        <option value="Completed">Completed</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-3 gap-4">
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">START DATE</label>
-                    <input type="date" name="start_date" id="edit_start_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">END DATE</label>
-                    <input type="date" name="end_date" id="edit_end_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
-                </div>
-                <div>
-                    <label class="block text-xs font-bold text-gray-700 mb-1">GRADUATION DATE</label>
-                    <input type="date" name="graduation_date" id="edit_graduation_date" class="w-full border rounded px-3 py-2 text-sm focus:outline-none">
-                </div>
-            </div>
+            <?php intern_fields($pdo, 'edit_', [], ['errors' => $editErrors]); ?>
 
             <div class="flex justify-end gap-3 border-t pt-4 mt-4">
                 <button type="button" onclick="closeEditModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
@@ -478,10 +293,12 @@ $interns = $internsStmt->fetchAll();
 
 <!-- Hidden Delete Form (outside table to avoid browser stripping) -->
 <form id="deleteInternForm" method="POST" action="dashboard.php" class="hidden">
+    <?php echo csrf_field(); ?>
     <input type="hidden" name="action" value="delete_intern">
     <input type="hidden" name="id" id="delete_id">
 </form>
 
+<script src="app.js"></script>
 <script>
     function openModal() {
         document.getElementById('addInternModal').classList.remove('hidden');
@@ -490,29 +307,28 @@ $interns = $internsStmt->fetchAll();
         document.getElementById('addInternModal').classList.add('hidden');
     }
 
-    function openEditModal(intern) {
+    function openEditModal(intern, keepErrors) {
+        const modal = document.getElementById('editInternModal');
         document.getElementById('edit_id').value = intern.id;
-        document.getElementById('edit_first_name').value = intern.first_name;
-        document.getElementById('edit_last_name').value = intern.last_name;
-        document.getElementById('edit_course').value = intern.course || '';
-        document.getElementById('edit_school').value = intern.school || '';
-        document.getElementById('edit_department').value = intern.department;
-        document.getElementById('edit_batch_year').value = intern.batch_year;
-        document.getElementById('edit_status').value = intern.status;
-        document.getElementById('edit_start_date').value = intern.start_date || '';
-        document.getElementById('edit_end_date').value = intern.end_date || '';
-        document.getElementById('edit_graduation_date').value = intern.graduation_date || '';
-        document.getElementById('editInternModal').classList.remove('hidden');
+        fillForm('edit_', intern);
+        if (!keepErrors) modal.querySelectorAll('[data-server-errors]').forEach(el => el.classList.add('hidden'));
+        modal.classList.remove('hidden');
     }
     function closeEditModal() {
         document.getElementById('editInternModal').classList.add('hidden');
     }
 
-    function deleteIntern(id) {
-        if (confirm('Are you sure you want to delete this intern?')) {
+    // Asks for confirmation in a proper dialog before deleting
+    function deleteIntern(id, name) {
+        confirmDialog({
+            title: 'Delete intern record?',
+            message: 'You are about to permanently delete ' + name + '. This cannot be undone.',
+            okLabel: 'Delete record'
+        }).then(ok => {
+            if (!ok) return;
             document.getElementById('delete_id').value = id;
             document.getElementById('deleteInternForm').submit();
-        }
+        });
     }
 
     // Client-Side Pagination & Live Filtering
@@ -525,7 +341,7 @@ $interns = $internsStmt->fetchAll();
         if (noFoundRow) noFoundRow.style.display = 'none';
 
         const searchTerm = document.getElementById('searchInput')?.value.toLowerCase() || '';
-        
+
         const filteredRows = rows.filter(row => {
             if (row.cells.length === 1) return false;
             return row.textContent.toLowerCase().includes(searchTerm);
@@ -546,13 +362,13 @@ $interns = $internsStmt->fetchAll();
 
         const pageIndicator = document.getElementById('pageIndicator');
         if (pageIndicator) pageIndicator.textContent = currentPage + ' / ' + totalPages;
-        
+
         const prevBtn = document.getElementById('prevBtn');
         if (prevBtn) prevBtn.disabled = currentPage === 1;
-        
+
         const nextBtn = document.getElementById('nextBtn');
         if (nextBtn) nextBtn.disabled = currentPage === totalPages;
-        
+
         const showingStats = document.getElementById('showingStats');
         if (showingStats) {
             showingStats.innerHTML = `Showing <span class="font-bold text-gray-700">${filteredRows.length}</span> interns`;
@@ -564,13 +380,20 @@ $interns = $internsStmt->fetchAll();
         renderTable();
     }
 
-    document.getElementById('searchInput')?.addEventListener('input', function(e) {
+    document.getElementById('searchInput')?.addEventListener('input', function () {
         currentPage = 1;
         renderTable();
     });
 
     // Initialize on load
-    document.addEventListener('DOMContentLoaded', renderTable);
+    document.addEventListener('DOMContentLoaded', () => {
+        renderTable();
+        <?php if ($openModal === 'add'): ?>
+        openModal();
+        <?php elseif ($openModal === 'edit'): ?>
+        openEditModal(<?php echo json_safe($old); ?>, true); // re-open with the server's error message
+        <?php endif; ?>
+    });
 </script>
 
 </body>
