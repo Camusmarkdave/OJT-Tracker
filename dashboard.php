@@ -2,6 +2,11 @@
 session_start();
 require_once 'db.php';
 require_login(); // Security check
+require_permission('records.view');
+
+$canAdd    = can('records.add');
+$canEdit   = can('records.edit');
+$canDelete = can('records.delete'); // Super Admin only
 
 $addErrors = [];
 $editErrors = [];
@@ -12,38 +17,59 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $action = $_POST['action'] ?? '';
 
-    // Add intern (added by an admin, so the record is accepted right away)
+    // Add intern (entered by an administrator, so the record is accepted immediately)
     if ($action === 'add_intern') {
+        require_permission('records.add');
         $old = clean_intern_input($_POST);
         $addErrors = validate_intern($old);
         if (!$addErrors) {
             insert_intern($pdo, $old, 'Approved', 'admin');
-            flash('success', $old['first_name'] . ' ' . $old['last_name'] . ' was added.');
+            audit_log($pdo, 'intern_added', 'Added intern record: ' . intern_summary($old) . '.');
+            flash('success', 'The intern record for ' . $old['first_name'] . ' ' . $old['last_name'] . ' was added successfully.');
             redirect('dashboard.php');
         }
         $openModal = 'add';
 
     // Edit intern
     } elseif ($action === 'edit_intern') {
+        require_permission('records.edit');
+        $id = (int)($_POST['id'] ?? 0);
+        $st = $pdo->prepare("SELECT * FROM interns WHERE id = ? AND validation_status = 'Approved'");
+        $st->execute([$id]);
+        $before = $st->fetch();
+        if (!$before) {
+            flash('error', 'The selected intern record could not be found. It may have been deleted.');
+            redirect('dashboard.php');
+        }
         $old = clean_intern_input($_POST);
-        $old['id'] = (int)($_POST['id'] ?? 0);
+        $old['id'] = $id;
         $editErrors = validate_intern($old);
         if (!$editErrors) {
-            update_intern($pdo, $old['id'], $old);
-            flash('success', $old['first_name'] . ' ' . $old['last_name'] . ' was updated.');
+            update_intern($pdo, $id, $old);
+            audit_log($pdo, 'intern_edited', 'Edited intern record for ' . trim($before['first_name'] . ' ' . $before['last_name']) . '. Changes: ' . intern_diff($before, $old) . '.');
+            flash('success', 'The intern record for ' . $old['first_name'] . ' ' . $old['last_name'] . ' was updated successfully.');
             redirect('dashboard.php');
         }
         $openModal = 'edit';
 
-    // Delete intern
+    // Delete intern (Super Admin only)
     } elseif ($action === 'delete_intern') {
-        $pdo->prepare("DELETE FROM interns WHERE id = ?")->execute([(int)($_POST['id'] ?? 0)]);
-        flash('success', 'Intern record deleted.');
+        require_permission('records.delete');
+        $id = (int)($_POST['id'] ?? 0);
+        $st = $pdo->prepare("SELECT * FROM interns WHERE id = ?");
+        $st->execute([$id]);
+        if ($row = $st->fetch()) {
+            $pdo->prepare("DELETE FROM interns WHERE id = ?")->execute([$id]);
+            audit_log($pdo, 'intern_deleted', 'Deleted intern record: ' . intern_summary($row) . '.');
+            flash('success', 'The intern record for ' . $row['first_name'] . ' ' . $row['last_name'] . ' was deleted.');
+        } else {
+            flash('error', 'The selected intern record could not be found.');
+        }
         redirect('dashboard.php');
     }
 }
 
-// Stats (accepted records only - pending/rejected submissions are handled on the Validation page)
+// Statistics (accepted records only; pending and rejected submissions are handled on the Validation page)
 $stats = ['Total' => 0, 'Active' => 0, 'Completed' => 0];
 $stmt = $pdo->query("SELECT status, COUNT(*) as count FROM interns WHERE validation_status='Approved' GROUP BY status");
 while ($row = $stmt->fetch()) {
@@ -58,7 +84,7 @@ $search       = trim($_GET['search'] ?? '');
 $statusFilter = trim($_GET['status'] ?? '');
 $schoolFilter = trim($_GET['school'] ?? '');
 if (!in_array($statusFilter, STATUSES, true)) { $statusFilter = ''; }
-$schools = get_schools($pdo); // schools entered through + Add Intern (and approved registrations)
+$schools = get_schools($pdo); // schools entered through Add Intern (and approved registrations)
 
 $sql = "SELECT * FROM interns WHERE validation_status='Approved'";
 $params = [];
@@ -85,9 +111,10 @@ $interns = $internsStmt->fetchAll();
 $tabLink = fn($status) => 'dashboard.php' . (($q = http_build_query(array_filter(['status' => $status, 'school' => $schoolFilter, 'search' => $search]))) ? "?$q" : '');
 $tabCls  = fn($on) => $on ? 'bg-figmaBlue text-white' : 'bg-white text-gray-500 hover:bg-gray-50';
 $pending = pending_count($pdo);
-$filtered = ($search !== '' || $schoolFilter !== '' || $statusFilter !== '');
+$filterCount = ($search !== '' ? 1 : 0) + ($schoolFilter !== '' ? 1 : 0) + ($statusFilter !== '' ? 1 : 0);
+$filtered = $filterCount > 0;
 
-page_start($pdo, 'Dashboard', 'dashboard');
+page_start($pdo, 'Intern Records', 'dashboard');
 ?>
 
         <!-- Header -->
@@ -97,13 +124,15 @@ page_start($pdo, 'Dashboard', 'dashboard');
                 <h2 class="text-2xl font-black uppercase text-gray-900 tracking-tight">INTERN RECORDS</h2>
             </div>
             <div class="flex items-center gap-4">
-                <a href="validation.php" title="<?php echo $pending; ?> record(s) waiting for validation" class="relative h-10 w-10 rounded border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50">
+                <a href="validation.php" title="<?php echo $pending; ?> registration(s) pending review" aria-label="Pending registrations" class="relative h-10 w-10 rounded border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path></svg>
                     <?php if ($pending > 0): ?><span class="absolute -right-1.5 -top-1.5 min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-black leading-[18px] text-white"><?php echo $pending; ?></span><?php endif; ?>
                 </a>
+                <?php if ($canAdd): ?>
                 <button onclick="openModal()" class="bg-[#0fb871] text-white px-5 py-2.5 rounded font-bold text-sm flex items-center gap-2 hover:bg-green-600 transition shadow-sm">
                 <span>+</span> ADD INTERN
                 </button>
+                <?php endif; ?>
             </div>
         </header>
 
@@ -114,12 +143,12 @@ page_start($pdo, 'Dashboard', 'dashboard');
 
             <?php if ($pending > 0): ?>
                 <a href="validation.php" class="mb-6 flex items-center justify-between rounded-lg border border-yellow-300 bg-yellow-50 px-5 py-3 text-sm text-yellow-800 hover:bg-yellow-100">
-                    <span><b><?php echo $pending; ?></b> self-registered intern<?php echo $pending === 1 ? '' : 's'; ?> waiting for your validation.</span>
-                    <span class="font-bold">Review now &rarr;</span>
+                    <span><b><?php echo $pending; ?></b> submitted registration<?php echo $pending === 1 ? ' is' : 's are'; ?> pending review.</span>
+                    <span class="font-bold">Review submissions &rarr;</span>
                 </a>
             <?php endif; ?>
 
-            <!-- Stats Grid -->
+            <!-- Statistics -->
             <div class="grid grid-cols-3 gap-6 mb-8">
                 <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-figmaBlue flex items-center gap-4">
                     <div class="h-12 w-12 rounded bg-blue-50 text-figmaBlue flex items-center justify-center shrink-0">
@@ -136,7 +165,7 @@ page_start($pdo, 'Dashboard', 'dashboard');
                     </div>
                     <div>
                         <div class="text-3xl font-black text-gray-800 leading-none"><?php echo $stats['Active']; ?></div>
-                        <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1">Active</div>
+                        <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1">Active Interns</div>
                     </div>
                 </div>
                 <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-red-400 flex items-center gap-4">
@@ -145,25 +174,30 @@ page_start($pdo, 'Dashboard', 'dashboard');
                     </div>
                     <div>
                         <div class="text-3xl font-black text-gray-800 leading-none"><?php echo $stats['Completed']; ?></div>
-                        <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1">Completed</div>
+                        <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1">Completed Internships</div>
                     </div>
                 </div>
             </div>
 
-            <!-- Toolbar Section: search + school filter + status tabs -->
-            <div class="bg-white p-4 rounded-t-lg border-b border-gray-100 flex items-center justify-between gap-4 shadow-sm">
-                <form method="GET" action="dashboard.php" class="flex flex-1 items-center gap-3">
+            <!-- Toolbar: search, school filter, Clear Filters, status tabs -->
+            <div class="bg-white p-4 rounded-t-lg border-b border-gray-100 flex flex-wrap items-center justify-between gap-4 shadow-sm">
+                <form method="GET" action="dashboard.php" class="flex flex-1 flex-wrap items-center gap-3">
                     <?php if ($statusFilter !== ''): ?><input type="hidden" name="status" value="<?php echo e($statusFilter); ?>"><?php endif; ?>
-                    <input type="text" id="searchInput" name="search" value="<?php echo e($search); ?>" placeholder="Search name, school, department..." onkeydown="if(event.key==='Enter')event.preventDefault()" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full max-w-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
-                    <select name="school" onchange="this.form.submit()" title="Filter by school" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-3 py-2 max-w-[240px] focus:outline-none focus:ring-1 focus:ring-figmaBlue <?php echo $schoolFilter !== '' ? 'border-figmaBlue font-bold text-figmaBlue' : 'text-gray-600'; ?>">
-                        <option value="">All schools (<?php echo count($schools); ?>)</option>
+                    <input type="text" id="searchInput" name="search" value="<?php echo e($search); ?>" placeholder="Search by name, school, or department" aria-label="Search intern records" onkeydown="if(event.key==='Enter')event.preventDefault()" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-4 py-2 w-full max-w-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <select name="school" onchange="this.form.submit()" title="Filter by school" aria-label="Filter by school" class="bg-gray-50 border border-gray-200 text-sm rounded-md px-3 py-2 max-w-[240px] focus:outline-none focus:ring-1 focus:ring-figmaBlue <?php echo $schoolFilter !== '' ? 'border-figmaBlue font-bold text-figmaBlue' : 'text-gray-600'; ?>">
+                        <option value="">All Schools (<?php echo count($schools); ?>)</option>
                         <?php foreach ($schools as $s): ?>
                             <option value="<?php echo e($s); ?>" <?php echo strcasecmp($schoolFilter, $s) === 0 ? 'selected' : ''; ?>><?php echo e($s); ?></option>
                         <?php endforeach; ?>
                     </select>
-                    <?php if ($filtered): ?>
-                        <a href="dashboard.php" class="whitespace-nowrap text-xs font-bold text-red-500 hover:text-red-700">&times; Clear filters</a>
-                    <?php endif; ?>
+
+                    <!-- Visible whenever any filter (including typed search text) is applied; resets everything to the default view -->
+                    <button type="button" id="clearFiltersBtn" onclick="clearFilters()" title="Remove all filters and show every intern record"
+                        class="<?php echo $filtered ? '' : 'hidden'; ?> inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-red-300 bg-red-50 px-4 py-2 text-xs font-bold text-red-700 shadow-sm transition hover:bg-red-600 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-1">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        CLEAR FILTERS
+                        <span id="filterCount" class="rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] leading-none text-white"><?php echo $filterCount; ?></span>
+                    </button>
                 </form>
                 <div class="flex items-center gap-4">
                     <div class="flex border border-gray-200 rounded-md overflow-hidden text-xs font-bold shadow-sm">
@@ -179,11 +213,11 @@ page_start($pdo, 'Dashboard', 'dashboard');
                 <table class="w-full text-left border-collapse">
                     <thead>
                         <tr class="bg-white border-b border-gray-100 text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                            <th class="p-5">Name</th>
+                            <th class="p-5">Intern</th>
                             <th class="p-5">School</th>
                             <th class="p-5">Department</th>
-                            <th class="p-5">Start</th>
-                            <th class="p-5">End</th>
+                            <th class="p-5">Start Date</th>
+                            <th class="p-5">End Date</th>
                             <th class="p-5">Status</th>
                             <th class="p-5 text-right">Actions</th>
                         </tr>
@@ -198,26 +232,31 @@ page_start($pdo, 'Dashboard', 'dashboard');
                                         </div>
                                         <div>
                                             <div class="text-sm font-bold text-gray-900"><?php echo e($fullName); ?></div>
-                                            <div class="text-xs text-gray-400"><?php echo e($intern['course'] ?: 'N/A'); ?></div>
+                                            <div class="text-xs text-gray-400"><?php echo e($intern['course'] ?: 'Course not specified'); ?></div>
                                         </div>
                                     </td>
-                                    <td class="p-5 text-sm text-gray-600"><?php echo e($intern['school']); ?></td>
+                                    <td class="p-5 text-sm text-gray-600"><?php echo e($intern['school'] ?: '-'); ?></td>
                                     <td class="p-5 text-sm text-gray-600"><?php echo e($intern['department']); ?></td>
                                     <td class="p-5 text-sm text-gray-600"><?php echo fmt_date($intern['start_date']); ?></td>
                                     <td class="p-5 text-sm text-gray-600"><?php echo fmt_date($intern['end_date']); ?></td>
                                     <td class="p-5"><?php echo status_badge((string)$intern['status']); ?></td>
                                     <td class="p-5">
                                         <div class="flex items-center justify-end gap-2">
+                                            <?php if ($canEdit): ?>
                                             <button type="button" onclick="openEditModal(<?php echo e(json_encode($intern)); ?>)" title="Edit <?php echo e($fullName); ?>" aria-label="Edit <?php echo e($fullName); ?>"
                                                 class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-figmaBlue shadow-sm transition hover:border-figmaBlue hover:bg-figmaBlue hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-figmaBlue focus-visible:ring-offset-1">
                                                 <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                                                 Edit
                                             </button>
+                                            <?php endif; ?>
+                                            <?php if ($canDelete): ?>
                                             <button type="button" onclick="deleteIntern(<?php echo (int)$intern['id']; ?>, <?php echo e(json_encode($fullName)); ?>)" title="Delete <?php echo e($fullName); ?>" aria-label="Delete <?php echo e($fullName); ?>"
                                                 class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-600 shadow-sm transition hover:border-red-600 hover:bg-red-600 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-1">
                                                 <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                                                 Delete
                                             </button>
+                                            <?php endif; ?>
+                                            <?php if (!$canEdit && !$canDelete): ?><span class="text-xs text-gray-400">View only</span><?php endif; ?>
                                         </div>
                                     </td>
                                 </tr>
@@ -225,7 +264,7 @@ page_start($pdo, 'Dashboard', 'dashboard');
                         <?php else: ?>
                             <tr>
                                 <td colspan="7" class="p-10 text-center text-sm text-gray-400">
-                                    <?php echo $filtered ? 'No interns match your filters.' : 'No interns found. Click "+ ADD INTERN" to get started.'; ?>
+                                    <?php echo $filtered ? 'No intern records match the selected filters.' : 'No intern records are available. Select "Add Intern" to create the first record.'; ?>
                                 </td>
                             </tr>
                         <?php endif; ?>
@@ -234,9 +273,9 @@ page_start($pdo, 'Dashboard', 'dashboard');
 
                 <!-- Pagination -->
                 <div class="p-5 border-t border-gray-100 flex items-center justify-between">
-                    <div class="text-xs text-gray-400" id="showingStats">Showing <span class="font-bold text-gray-700"><?php echo count($interns); ?></span> interns</div>
+                    <div class="text-xs text-gray-400" id="showingStats">Showing <span class="font-bold text-gray-700"><?php echo count($interns); ?></span> intern records</div>
                     <div class="flex gap-2">
-                        <button id="prevBtn" onclick="changePage(-1)" class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">&larr; Prev</button>
+                        <button id="prevBtn" onclick="changePage(-1)" class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">&larr; Previous</button>
                         <button id="pageIndicator" class="bg-figmaBlue text-white rounded px-3 py-1 text-xs font-bold">1</button>
                         <button id="nextBtn" onclick="changePage(1)" class="border border-gray-200 text-gray-500 rounded px-3 py-1 text-xs font-bold hover:bg-gray-50 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed">Next &rarr;</button>
                     </div>
@@ -246,12 +285,13 @@ page_start($pdo, 'Dashboard', 'dashboard');
         </div>
     </main>
 
+<?php if ($canAdd): ?>
 <!-- Add Intern Modal -->
 <div id="addInternModal" data-modal class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 relative overflow-y-auto max-h-[90vh]">
         <div class="flex justify-between items-center border-b pb-3 mb-4">
-            <h3 class="text-lg font-bold text-gray-800">Add New Intern</h3>
-            <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
+            <h3 class="text-lg font-bold text-gray-800">Add Intern Record</h3>
+            <button onclick="closeModal()" aria-label="Close" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
         </div>
 
         <form method="POST" action="dashboard.php" <?php echo form_attrs(); ?> class="space-y-4">
@@ -262,18 +302,20 @@ page_start($pdo, 'Dashboard', 'dashboard');
 
             <div class="flex justify-end gap-3 border-t pt-4 mt-4">
                 <button type="button" onclick="closeModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
-                <button type="submit" class="px-4 py-2 bg-[#0fb871] text-white rounded text-xs font-bold hover:bg-green-600 transition">SAVE INTERN</button>
+                <button type="submit" class="px-4 py-2 bg-[#0fb871] text-white rounded text-xs font-bold hover:bg-green-600 transition">SAVE RECORD</button>
             </div>
         </form>
     </div>
 </div>
+<?php endif; ?>
 
+<?php if ($canEdit): ?>
 <!-- Edit Intern Modal -->
 <div id="editInternModal" data-modal class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden">
     <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 relative overflow-y-auto max-h-[90vh]">
         <div class="flex justify-between items-center border-b pb-3 mb-4">
-            <h3 class="text-lg font-bold text-gray-800">Edit Intern</h3>
-            <button onclick="closeEditModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
+            <h3 class="text-lg font-bold text-gray-800">Edit Intern Record</h3>
+            <button onclick="closeEditModal()" aria-label="Close" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
         </div>
 
         <form method="POST" action="dashboard.php" <?php echo form_attrs(); ?> class="space-y-4">
@@ -285,18 +327,21 @@ page_start($pdo, 'Dashboard', 'dashboard');
 
             <div class="flex justify-end gap-3 border-t pt-4 mt-4">
                 <button type="button" onclick="closeEditModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
-                <button type="submit" class="px-4 py-2 bg-figmaBlue text-white rounded text-xs font-bold hover:bg-blue-900 transition">UPDATE INTERN</button>
+                <button type="submit" class="px-4 py-2 bg-figmaBlue text-white rounded text-xs font-bold hover:bg-blue-900 transition">UPDATE RECORD</button>
             </div>
         </form>
     </div>
 </div>
+<?php endif; ?>
 
-<!-- Hidden Delete Form (outside table to avoid browser stripping) -->
+<?php if ($canDelete): ?>
+<!-- Hidden Delete Form (outside the table so the browser does not strip it) -->
 <form id="deleteInternForm" method="POST" action="dashboard.php" class="hidden">
     <?php echo csrf_field(); ?>
     <input type="hidden" name="action" value="delete_intern">
     <input type="hidden" name="id" id="delete_id">
 </form>
+<?php endif; ?>
 
 <script src="app.js"></script>
 <script>
@@ -318,12 +363,12 @@ page_start($pdo, 'Dashboard', 'dashboard');
         document.getElementById('editInternModal').classList.add('hidden');
     }
 
-    // Asks for confirmation in a proper dialog before deleting
+    // Requests confirmation in a dialog before deleting (Super Admin only)
     function deleteIntern(id, name) {
         confirmDialog({
-            title: 'Delete intern record?',
-            message: 'You are about to permanently delete ' + name + '. This cannot be undone.',
-            okLabel: 'Delete record'
+            title: 'Delete Intern Record?',
+            message: 'You are about to permanently delete the record for ' + name + '. This action cannot be undone.',
+            okLabel: 'Delete Record'
         }).then(ok => {
             if (!ok) return;
             document.getElementById('delete_id').value = id;
@@ -331,7 +376,31 @@ page_start($pdo, 'Dashboard', 'dashboard');
         });
     }
 
-    // Client-Side Pagination & Live Filtering
+    /* ---------- Filters ---------- */
+    const SERVER_STATUS = <?php echo json_safe($statusFilter); ?>;
+
+    // Number of filters currently applied: status tab, school, and any search text typed
+    function activeFilterCount() {
+        let n = 0;
+        if (SERVER_STATUS) n++;
+        if (document.querySelector('select[name="school"]').value) n++;
+        if (document.getElementById('searchInput').value.trim() !== '') n++;
+        return n;
+    }
+
+    // Shows the Clear Filters button whenever at least one filter is applied
+    function updateClearButton() {
+        const n = activeFilterCount();
+        document.getElementById('clearFiltersBtn').classList.toggle('hidden', n === 0);
+        document.getElementById('filterCount').textContent = n;
+    }
+
+    // Removes every filter (search, school and status) and returns to the default view
+    function clearFilters() {
+        window.location.href = 'dashboard.php';
+    }
+
+    /* ---------- Client-side pagination and live search ---------- */
     const rowsPerPage = 10;
     let currentPage = 1;
 
@@ -371,7 +440,7 @@ page_start($pdo, 'Dashboard', 'dashboard');
 
         const showingStats = document.getElementById('showingStats');
         if (showingStats) {
-            showingStats.innerHTML = `Showing <span class="font-bold text-gray-700">${filteredRows.length}</span> interns`;
+            showingStats.innerHTML = `Showing <span class="font-bold text-gray-700">${filteredRows.length}</span> intern record${filteredRows.length === 1 ? '' : 's'}`;
         }
     }
 
@@ -383,11 +452,13 @@ page_start($pdo, 'Dashboard', 'dashboard');
     document.getElementById('searchInput')?.addEventListener('input', function () {
         currentPage = 1;
         renderTable();
+        updateClearButton();
     });
 
     // Initialize on load
     document.addEventListener('DOMContentLoaded', () => {
         renderTable();
+        updateClearButton();
         <?php if ($openModal === 'add'): ?>
         openModal();
         <?php elseif ($openModal === 'edit'): ?>

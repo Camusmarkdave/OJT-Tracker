@@ -1,33 +1,52 @@
 <?php
 session_start();
-require_once 'db.php'; // Include database connection
+require_once 'db.php'; // Database connection and shared helpers
 
 $error_message = '';
+$notice = '';
+
+if (($_GET['reason'] ?? '') === 'deactivated') {
+    $notice = 'Your session has ended because your account is no longer active. Please contact a Super Admin.';
+} elseif (isset($_GET['loggedout'])) {
+    $notice = 'You have been signed out successfully.';
+}
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $username = trim($_POST['username'] ?? '');
     $password = trim($_POST['password'] ?? '');
 
-    if (!empty($username) && !empty($password)) {
-        // Prepare statement to prevent SQL injection
-        $stmt = $pdo->prepare("SELECT id, password_hash FROM users WHERE username = :username");
+    if ($username !== '' && $password !== '') {
+        // Prepared statement to prevent SQL injection
+        $stmt = $pdo->prepare("SELECT id, username, password_hash, `role`, is_active FROM users WHERE username = :username");
         $stmt->execute(['username' => $username]);
         $user = $stmt->fetch();
 
-        // Verify password (assuming you used password_hash() when creating users)
-        if ($user && password_verify($password, $user['password_hash'])) {
+        if (!$user) {
+            audit_log($pdo, 'login_failed', 'Sign-in attempt using an unrecognized username.', ['id' => null, 'username' => mb_substr($username, 0, 50), 'role' => null]);
+            $error_message = "The username or password you entered is incorrect.";
+
+        } elseif (!password_verify($password, $user['password_hash'])) {
+            audit_log($pdo, 'login_failed', 'Sign-in attempt with an incorrect password.', $user);
+            $error_message = "The username or password you entered is incorrect.";
+
+        } elseif (!(int)$user['is_active']) {
+            audit_log($pdo, 'login_failed', 'Sign-in blocked: the account is deactivated.', $user);
+            $error_message = "This account has been deactivated. Please contact a Super Admin.";
+
+        } else {
             session_regenerate_id(true);
             $_SESSION['loggedin'] = true;
             $_SESSION['user_id'] = $user['id'];
-            $_SESSION['username'] = $username;
+            $_SESSION['username'] = $user['username'];
+
+            $pdo->prepare("UPDATE users SET last_login_at = NOW() WHERE id = ?")->execute([$user['id']]);
+            audit_log($pdo, 'login', 'Signed in successfully.', $user);
 
             header("Location: dashboard.php");
             exit;
-        } else {
-            $error_message = "Invalid username or password.";
         }
     } else {
-        $error_message = "Please fill in all fields.";
+        $error_message = "Please enter both your username and password.";
     }
 }
 ?>
@@ -36,7 +55,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?php echo e(APP_NAME); ?> - Login</title>
+    <title><?php echo e(APP_NAME); ?> - Administrator Sign In</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -68,60 +87,66 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
       <div class="z-10 flex-grow">
         <div class="mb-6 h-1 w-12 bg-figmaYellow"></div>
         <h1 class="mb-4 text-5xl font-extrabold uppercase leading-none tracking-tight">
-          Manage<br>Interns.<br><span class="text-figmaYellow">Simply.</span>
+          Manage<br>Interns.<br><span class="text-figmaYellow">Efficiently.</span>
         </h1>
         <p class="mb-12 max-w-sm text-sm text-blue-100 leading-relaxed">
-          A centralized records system for tracking intern schools, departments, and timelines.
+          A centralized OJT management system for maintaining intern records, schools, departments, and internship schedules.
         </p>
       </div>
 
-      <div class="z-10 flex gap-8">
-        <div><div class="text-3xl font-extrabold text-figmaYellow">8</div><div class="text-xs text-blue-200">Interns Enrolled</div></div>
-        <div><div class="text-3xl font-extrabold text-figmaYellow">6</div><div class="text-xs text-blue-200">Departments</div></div>
-        <div><div class="text-3xl font-extrabold text-figmaYellow">2025</div><div class="text-xs text-blue-200">Batch Year</div></div>
+      <div class="z-10 grid grid-cols-3 gap-6">
+        <div><div class="text-lg font-extrabold text-figmaYellow">Records</div><div class="text-xs text-blue-200">Centralized intern profiles</div></div>
+        <div><div class="text-lg font-extrabold text-figmaYellow">Validation</div><div class="text-xs text-blue-200">Reviewed before acceptance</div></div>
+        <div><div class="text-lg font-extrabold text-figmaYellow">Reports</div><div class="text-xs text-blue-200">School and department analytics</div></div>
       </div>
     </div>
 
     <!-- Right Side: Form -->
     <div class="flex w-full flex-col justify-between bg-figmaBg p-10 md:w-1/2 md:p-14">
       <div>
-        <div class="mb-2 text-xs font-bold tracking-widest text-green-600">HR PORTAL</div>
-        <h2 class="mb-8 text-4xl font-extrabold uppercase leading-none text-figmaDark">Welcome<br>Back</h2>
+        <div class="mb-2 text-xs font-bold tracking-widest text-green-600">ADMINISTRATOR PORTAL</div>
+        <h2 class="mb-8 text-4xl font-extrabold uppercase leading-none text-figmaDark">Administrator<br>Sign In</h2>
+
+        <?php if ($notice !== ''): ?>
+            <div class="mb-4 rounded border-l-4 border-blue-500 bg-blue-50 p-4 text-sm text-blue-800">
+                <?php echo e($notice); ?>
+            </div>
+        <?php endif; ?>
 
         <?php if (!empty($error_message)): ?>
             <div class="mb-4 rounded border-l-4 border-red-500 bg-red-100 p-4 text-sm text-red-700">
-                <?php echo htmlspecialchars($error_message); ?>
+                <?php echo e($error_message); ?>
             </div>
         <?php endif; ?>
 
         <form method="POST" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" class="space-y-6">
           <div>
-            <label class="mb-2 block text-xs font-bold text-figmaDark">USERNAME</label>
-            <input type="text" name="username" placeholder="e.g. hr.admin" required class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+            <label class="mb-2 block text-xs font-bold text-figmaDark" for="username">USERNAME</label>
+            <input type="text" id="username" name="username" placeholder="Enter your username" required autocomplete="username" class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
           </div>
           <div>
-            <label class="mb-2 block text-xs font-bold text-figmaDark">PASSWORD</label>
-            <input type="password" name="password" placeholder="••••••••" required class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+            <label class="mb-2 block text-xs font-bold text-figmaDark" for="password">PASSWORD</label>
+            <input type="password" id="password" name="password" placeholder="Enter your password" required autocomplete="current-password" class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
           </div>
           <button type="submit" class="mt-2 flex w-full items-center justify-center gap-2 rounded bg-figmaBlue px-4 py-3 text-sm font-bold text-white transition hover:bg-blue-900 shadow-md">
             SIGN IN &rarr;
           </button>
         </form>
 
-        <!-- New OJTs: the only public entry point to the Register page -->
+        <!-- New OJT interns: the only public entry point to the Registration page -->
         <div class="mt-8 flex items-center justify-between gap-4 rounded border border-gray-200 bg-white p-4">
           <div class="text-sm text-gray-600">
-            <div class="font-bold text-figmaDark">New OJT / intern?</div>
-            Submit your own details for HR to validate.
+            <div class="font-bold text-figmaDark">New OJT intern?</div>
+            Submit your information for review by the HR Department.
           </div>
           <a href="register.php" class="shrink-0 rounded border-2 border-figmaBlue px-4 py-2 text-xs font-bold text-figmaBlue transition hover:bg-figmaBlue hover:text-white">REGISTER</a>
         </div>
 
         <div class="mt-6 text-sm text-gray-500">
-          Access issues? <a href="#" class="font-bold text-figmaBlue hover:underline">Contact IT Support</a>
+          Need assistance signing in? <a href="#" class="font-bold text-figmaBlue hover:underline">Contact IT Support</a>
         </div>
       </div>
-      <div class="mt-16 text-xs text-gray-400">&copy; 2025 <?php echo e(APP_NAME); ?> System — Confidential</div>
+      <div class="mt-16 text-xs text-gray-400">&copy; <?php echo date('Y'); ?> <?php echo e(APP_NAME); ?> OJT Management System. Confidential and for authorized use only.</div>
     </div>
   </div>
 </body>

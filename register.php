@@ -1,5 +1,5 @@
 <?php
-// Public page (no login). Reached only through the "Register" link on login.php.
+// Public page (no sign-in required). Reached only through the "Register" link on login.php.
 // Submissions are stored as 'Pending' and stay out of the dashboard, reports and filters until an admin approves them.
 session_start();
 require_once 'db.php';
@@ -12,29 +12,27 @@ $old       = [];
 if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
 
-    if (!empty($_POST['website'])) { // honeypot: real people never fill this hidden field
+    if (!empty($_POST['website'])) { // honeypot: genuine users never complete this hidden field
         redirect('register.php?submitted=1');
     }
 
     $old = clean_intern_input($_POST);
-    $old['status'] = 'Active'; // the admin can change the status while validating
+    $old['status'] = 'Active'; // an admin may change the status during validation
 
     // Basic throttle: 5 submissions per browser session per hour
     $_SESSION['reg_log'] = array_values(array_filter($_SESSION['reg_log'] ?? [], fn($t) => $t > time() - 3600));
 
     if (count($_SESSION['reg_log']) >= 5) {
-        $errors[] = 'You have submitted several records recently. Please try again later or contact HR.';
+        $errors[] = 'Several registrations were submitted from this browser recently. Please try again later or contact the HR Department.';
     } else {
         $errors = validate_intern($old);
-        $depts = get_departments($pdo);
-        if ($depts && $old['department'] !== '' && !in_array($old['department'], $depts, true)) {
-            $errors[] = 'Please choose a department from the list.';
-        }
         if (!$errors && find_duplicate($pdo, $old)) {
-            $errors[] = 'A record with this name and batch year has already been submitted. If you need to correct it, please contact HR.';
+            $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
         }
         if (!$errors) {
             insert_intern($pdo, $old, 'Pending', 'register');
+            audit_log($pdo, 'registration_submitted', 'Registration submitted for ' . intern_summary($old) . '.',
+                ['id' => null, 'username' => 'Public registration', 'role' => null]);
             $_SESSION['reg_log'][] = time();
             redirect('register.php?submitted=1');
         }
@@ -46,7 +44,7 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?php echo e(APP_NAME); ?> - Register</title>
+    <title><?php echo e(APP_NAME); ?> - Intern Registration</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -57,7 +55,7 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
 <body class="flex min-h-screen w-full items-center justify-center bg-gray-900 p-4 font-sans">
   <div class="flex w-full max-w-[1100px] flex-col overflow-hidden bg-white shadow-2xl md:flex-row">
 
-    <!-- Left Side: Branding + what happens next -->
+    <!-- Left Side: Branding + registration process -->
     <div class="relative flex w-full flex-col bg-figmaBlue p-10 text-white md:w-2/5 overflow-hidden">
       <div class="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-white opacity-5"></div>
       <div class="absolute -bottom-20 -right-20 h-80 w-80 rounded-full bg-teal-500 opacity-20"></div>
@@ -71,13 +69,13 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
       <div class="z-10 flex-grow">
         <div class="mb-6 h-1 w-12 bg-figmaYellow"></div>
-        <h1 class="mb-4 text-4xl font-extrabold uppercase leading-none tracking-tight">Register<br>as an <span class="text-figmaYellow">intern</span></h1>
-        <p class="mb-10 max-w-xs text-sm leading-relaxed text-blue-100">Enter your own details so HR can add you to the OJT records.</p>
+        <h1 class="mb-4 text-4xl font-extrabold uppercase leading-none tracking-tight">Intern<br><span class="text-figmaYellow">Registration</span></h1>
+        <p class="mb-10 max-w-xs text-sm leading-relaxed text-blue-100">Submit your information to be included in the official OJT intern records.</p>
 
         <ol class="space-y-5 text-sm">
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">1</span><span class="text-blue-100"><b class="text-white">Fill in your details.</b><br>School, course, department and dates.</span></li>
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">2</span><span class="text-blue-100"><b class="text-white">HR checks your record.</b><br>They may correct or reject entries.</span></li>
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">3</span><span class="text-blue-100"><b class="text-white">You're on the roster.</b><br>Once approved, your record is official.</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">1</span><span class="text-blue-100"><b class="text-white">Submit your information.</b><br>Provide your school, course, department, and internship dates.</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">2</span><span class="text-blue-100"><b class="text-white">HR Department review.</b><br>Your submission is verified and corrected where necessary.</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">3</span><span class="text-blue-100"><b class="text-white">Record accepted.</b><br>Once approved, your information becomes part of the official records.</span></li>
         </ol>
       </div>
     </div>
@@ -90,11 +88,11 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-green-100 text-green-600">
                     <svg class="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>
                 </div>
-                <h2 class="mb-2 text-2xl font-extrabold uppercase text-figmaDark">Record submitted</h2>
-                <p class="max-w-sm text-sm text-gray-600">Thank you! HR will review your details. Your record becomes official once it has been approved. You don't need to submit it again.</p>
+                <h2 class="mb-2 text-2xl font-extrabold uppercase text-figmaDark">Registration Submitted</h2>
+                <p class="max-w-sm text-sm text-gray-600">Thank you. Your registration has been received and is pending review by the HR Department. No further action is required, and you do not need to submit it again.</p>
                 <div class="mt-8 flex gap-3">
                     <a href="register.php" class="rounded border border-gray-300 bg-white px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-50">REGISTER ANOTHER INTERN</a>
-                    <a href="login.php" class="rounded bg-figmaBlue px-4 py-2 text-xs font-bold text-white hover:bg-blue-900">BACK TO LOGIN</a>
+                    <a href="login.php" class="rounded bg-figmaBlue px-4 py-2 text-xs font-bold text-white hover:bg-blue-900">RETURN TO SIGN IN</a>
                 </div>
             </div>
 
@@ -103,14 +101,14 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-yellow-100 text-yellow-600">
                     <svg class="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
                 </div>
-                <h2 class="mb-2 text-2xl font-extrabold uppercase text-figmaDark">Registration is closed</h2>
-                <p class="max-w-sm text-sm text-gray-600">HR isn't accepting new registrations right now. Please contact the HR department for help.</p>
-                <a href="login.php" class="mt-8 rounded bg-figmaBlue px-4 py-2 text-xs font-bold text-white hover:bg-blue-900">BACK TO LOGIN</a>
+                <h2 class="mb-2 text-2xl font-extrabold uppercase text-figmaDark">Registration Is Closed</h2>
+                <p class="max-w-sm text-sm text-gray-600">The HR Department is not accepting new registrations at this time. Please contact the HR Department for assistance.</p>
+                <a href="login.php" class="mt-8 rounded bg-figmaBlue px-4 py-2 text-xs font-bold text-white hover:bg-blue-900">RETURN TO SIGN IN</a>
             </div>
 
         <?php else: ?>
             <div class="mb-2 text-xs font-bold tracking-widest text-green-600">NEW INTERN</div>
-            <h2 class="mb-6 text-3xl font-extrabold uppercase leading-none text-figmaDark">Your details</h2>
+            <h2 class="mb-6 text-3xl font-extrabold uppercase leading-none text-figmaDark">Registration Form</h2>
 
             <form method="POST" action="register.php" <?php echo form_attrs(); ?> class="space-y-4">
                 <?php echo csrf_field(); ?>
@@ -120,17 +118,17 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 <label class="flex items-start gap-3 rounded border border-gray-200 bg-white p-3 text-xs text-gray-600">
                     <input type="checkbox" required class="mt-0.5 h-4 w-4 accent-[#15458A]">
-                    <span>I confirm that the information above is correct. I understand HR will review it before it is accepted.</span>
+                    <span>I certify that the information provided is accurate and complete, and I understand that it will be reviewed by the HR Department before it is accepted.</span>
                 </label>
 
                 <div class="flex items-center justify-between border-t border-gray-200 pt-4">
-                    <a href="login.php" class="text-xs font-bold text-gray-500 hover:text-figmaBlue">&larr; Back to login</a>
-                    <button type="submit" class="rounded bg-figmaBlue px-6 py-3 text-sm font-bold text-white shadow-md transition hover:bg-blue-900">SUBMIT FOR VALIDATION</button>
+                    <a href="login.php" class="text-xs font-bold text-gray-500 hover:text-figmaBlue">&larr; Return to sign in</a>
+                    <button type="submit" class="rounded bg-figmaBlue px-6 py-3 text-sm font-bold text-white shadow-md transition hover:bg-blue-900">SUBMIT REGISTRATION</button>
                 </div>
             </form>
         <?php endif; ?>
       </div>
-      <div class="mt-10 text-xs text-gray-400">&copy; 2025 <?php echo e(APP_NAME); ?> System — Confidential</div>
+      <div class="mt-10 text-xs text-gray-400">&copy; <?php echo date('Y'); ?> <?php echo e(APP_NAME); ?> OJT Management System. Confidential and for authorized use only.</div>
     </div>
   </div>
   <script src="app.js"></script>

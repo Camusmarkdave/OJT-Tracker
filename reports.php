@@ -2,14 +2,15 @@
 session_start();
 require_once 'db.php';
 require_login(); // Security check
+require_permission('reports.view');
 
-// Only accepted records are reported on (pending/rejected submissions live on the Validation page)
+// Only accepted records are reported on (pending and rejected submissions are managed on the Validation page)
 $rows = $pdo->query("SELECT id, first_name, last_name, course, school, department, start_date, end_date, status, batch_year
                      FROM interns WHERE validation_status='Approved'")->fetchAll();
 
-// Group spellings that only differ by case/spacing (e.g. "UP Diliman" vs "up diliman")
-const NO_SCHOOL = 'No school listed';
-const NO_DEPT   = 'No department';
+// Group spellings that differ only by letter case (for example "Holy Angel University" and "holy angel university")
+const NO_SCHOOL = 'School Not Specified';
+const NO_DEPT   = 'Department Not Specified';
 $canon = function (?string $v, array &$map, string $fallback): string {
     $v = trim((string)$v);
     if ($v === '') { return $fallback; }
@@ -40,16 +41,19 @@ $orderParam = $_GET['order'] ?? 'count_desc';
 if (!in_array($orderParam, ['count_desc', 'count_asc', 'alpha_asc', 'alpha_desc'], true)) { $orderParam = 'count_desc'; }
 $view = ($_GET['view'] ?? 'school') === 'department' ? 'department' : 'school';
 
+$me = current_user();
+$generatedBy = trim($me['display_name'] ?: $me['username']);
+
 page_start($pdo, 'Reports', 'reports');
 ?>
 
         <!-- Header -->
-        <header class="h-20 bg-white px-8 flex justify-between items-center border-b-2 border-blue-400 shadow-sm shrink-0">
+        <header class="h-20 bg-white px-8 flex justify-between items-center border-b-2 border-blue-400 shadow-sm shrink-0 print:hidden">
             <div>
-                <div class="text-xs text-gray-400 font-medium mb-1">Reports <span class="mx-1">></span> <span class="text-gray-800">Summary</span></div>
-                <h2 class="text-2xl font-black uppercase text-gray-900 tracking-tight">ANALYTICS & REPORTS</h2>
+                <div class="text-xs text-gray-400 font-medium mb-1">Reports <span class="mx-1">></span> <span class="text-gray-800">Placement Summary</span></div>
+                <h2 class="text-2xl font-black uppercase text-gray-900 tracking-tight">ANALYTICS AND REPORTS</h2>
             </div>
-            <button onclick="window.print()" class="flex items-center gap-2 rounded border border-gray-200 bg-white px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-50 print:hidden">
+            <button onclick="window.print()" class="flex items-center gap-2 rounded border border-gray-200 bg-white px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-50">
                 <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
                 PRINT REPORT
             </button>
@@ -58,20 +62,26 @@ page_start($pdo, 'Reports', 'reports');
         <!-- Scrollable Body -->
         <div class="p-8 overflow-y-auto flex-1 flex flex-col gap-6">
 
+            <!-- Print-only report heading -->
+            <div class="hidden print:block border-b border-gray-300 pb-4">
+                <h1 class="text-2xl font-black text-gray-900"><?php echo e(APP_NAME); ?> - Intern Placement Report</h1>
+                <p class="mt-1 text-sm text-gray-600">Generated on <?php echo date('F j, Y'); ?> by <?php echo e($generatedBy); ?>. This report is based on accepted intern records only.</p>
+            </div>
+
         <?php if ($total === 0): ?>
             <div class="flex flex-1 flex-col items-center justify-center rounded-lg border border-dashed border-gray-300 bg-white p-12 text-center">
-                <h3 class="mb-1 text-lg font-bold text-gray-800">No accepted intern records yet</h3>
-                <p class="mb-5 max-w-sm text-sm text-gray-500">Reports are built from accepted records. Add an intern, or approve a submitted registration, to see your numbers here.</p>
+                <h3 class="mb-1 text-lg font-bold text-gray-800">No Accepted Intern Records</h3>
+                <p class="mb-5 max-w-md text-sm text-gray-500">Reports are generated from accepted intern records. Add an intern record or approve a pending registration to populate this report.</p>
                 <div class="flex gap-3">
                     <a href="dashboard.php" class="rounded bg-figmaBlue px-4 py-2 text-xs font-bold text-white hover:bg-blue-900">GO TO INTERN RECORDS</a>
-                    <a href="validation.php" class="rounded border border-gray-300 px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-50">OPEN VALIDATION</a>
+                    <a href="validation.php" class="rounded border border-gray-300 px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-50">GO TO VALIDATION</a>
                 </div>
             </div>
         <?php else: ?>
 
             <!-- Summary -->
             <div class="grid grid-cols-4 gap-6">
-                <?php foreach ([['Accepted interns', $total, 'border-l-figmaBlue'], ['Schools', $nSchool, 'border-l-[#0fb871]'], ['Departments', $nDept, 'border-l-figmaYellow'], ['Active interns', $active, 'border-l-red-400']] as [$label, $n, $cls]): ?>
+                <?php foreach ([['Total Accepted Interns', $total, 'border-l-figmaBlue'], ['Schools Represented', $nSchool, 'border-l-[#0fb871]'], ['Departments', $nDept, 'border-l-figmaYellow'], ['Currently Active', $active, 'border-l-red-400']] as [$label, $n, $cls]): ?>
                 <div class="bg-white p-5 rounded-lg shadow-sm border border-gray-100 border-l-4 <?php echo $cls; ?>">
                     <div class="text-3xl font-black text-gray-800 leading-none"><?php echo $n; ?></div>
                     <div class="text-[10px] font-bold text-gray-400 tracking-wider uppercase mt-1"><?php echo $label; ?></div>
@@ -81,30 +91,36 @@ page_start($pdo, 'Reports', 'reports');
 
             <!-- Controls -->
             <div class="flex flex-wrap items-center justify-between gap-4 print:hidden">
-                <div class="flex items-center gap-4">
+                <div class="flex flex-wrap items-center gap-3">
                     <div id="viewToggle" class="flex overflow-hidden rounded-md border border-gray-200 text-xs font-bold shadow-sm">
                         <button data-view="school" class="px-5 py-2.5">BY SCHOOL</button>
                         <button data-view="department" class="border-l border-gray-200 px-5 py-2.5">BY DEPARTMENT</button>
                     </div>
-                    <input id="listSearch" type="text" class="w-64 rounded-md border border-gray-200 bg-white px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <input id="listSearch" type="text" aria-label="Search the list" class="w-64 rounded-md border border-gray-200 bg-white px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <!-- Visible whenever search text is applied -->
+                    <button type="button" id="clearListBtn" onclick="clearListFilter()" title="Remove the search filter and show the full list"
+                        class="hidden inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-red-300 bg-red-50 px-4 py-2.5 text-xs font-bold text-red-700 shadow-sm transition hover:bg-red-600 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-1">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        CLEAR FILTERS
+                    </button>
                 </div>
                 <div class="flex items-center gap-3 rounded-lg border border-gray-200 bg-white px-4 py-2">
                     <label for="orderSelect" class="text-xs font-bold uppercase tracking-wider text-gray-500">Sort By</label>
                     <select id="orderSelect" class="cursor-pointer border-none bg-transparent text-sm font-bold text-gray-800 focus:outline-none">
-                        <option value="count_desc">Descending Order</option>
-                        <option value="count_asc">Ascending Order</option>
-                        <option value="alpha_asc">Alphabetical (A-Z)</option>
-                        <option value="alpha_desc">Alphabetical (Z-A)</option>
+                        <option value="count_desc">Number of Interns (Highest to Lowest)</option>
+                        <option value="count_asc">Number of Interns (Lowest to Highest)</option>
+                        <option value="alpha_asc">Name (A to Z)</option>
+                        <option value="alpha_desc">Name (Z to A)</option>
                     </select>
                 </div>
             </div>
 
-            <!-- Master / detail: pick an item on the left, see its interns on the right -->
+            <!-- Master / detail: select an entry on the left to view its interns on the right -->
             <div class="grid flex-1 grid-cols-12 items-start gap-6">
                 <div class="col-span-4 overflow-hidden rounded-lg border border-gray-100 bg-white shadow-sm print:hidden">
                     <div class="border-b border-gray-100 px-5 py-4">
                         <div id="listTitle" class="text-sm font-bold text-gray-800"></div>
-                        <div class="text-xs text-gray-400">Select one to see who is in it.</div>
+                        <div class="text-xs text-gray-400">Select an entry to view the interns assigned to it.</div>
                     </div>
                     <div id="list" class="max-h-[calc(100vh-24rem)] min-h-[200px] divide-y divide-gray-100 overflow-y-auto"></div>
                 </div>
@@ -150,8 +166,16 @@ page_start($pdo, 'Reports', 'reports');
             b.className = b.className.replace(/bg-figmaBlue text-white|bg-white text-gray-500 hover:bg-gray-50/g, '').trim() +
                 (on ? ' bg-figmaBlue text-white' : ' bg-white text-gray-500 hover:bg-gray-50');
         });
-        $('listSearch').placeholder = state.view === 'school' ? 'Find a school...' : 'Find a department...';
+        $('listSearch').placeholder = state.view === 'school' ? 'Search schools' : 'Search departments';
         $('orderSelect').value = state.order;
+        $('clearListBtn').classList.toggle('hidden', state.q.trim() === '');
+    }
+
+    // Removes the search filter and restores the full list
+    function clearListFilter() {
+        state.q = '';
+        $('listSearch').value = '';
+        render();
     }
 
     function render() {
@@ -160,7 +184,7 @@ page_start($pdo, 'Reports', 'reports');
         const list = sortGroups(buildGroups(DATA, state.view).filter(g => !q || g.name.toLowerCase().includes(q)));
         if (!list.some(g => g.name === state.selected)) state.selected = list.length ? list[0].name : null;
 
-        $('listTitle').textContent = plural(list.length, state.view === 'school' ? 'school' : 'department');
+        $('listTitle').textContent = (state.view === 'school' ? 'Schools' : 'Departments') + ' (' + list.length + ')';
         const max = Math.max(1, ...list.map(g => g.items.length));
         $('list').innerHTML = list.length ? list.map(g => {
             const n = g.items.length, on = g.name === state.selected;
@@ -170,31 +194,31 @@ page_start($pdo, 'Reports', 'reports');
                     <span class="shrink-0 text-sm font-black ${on ? 'text-figmaBlue' : 'text-gray-700'}">${n}</span>
                 </div>
                 <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100"><div class="h-full rounded-full bg-figmaBlue" style="width:${Math.round(n / max * 100)}%"></div></div>
-                <div class="mt-1 text-[10px] text-gray-400">${Math.round(n / TOTAL * 100)}% of all interns</div>
+                <div class="mt-1 text-[10px] text-gray-400">${Math.round(n / TOTAL * 100)}% of total accepted interns</div>
             </button>`;
-        }).join('') : '<div class="p-8 text-center text-sm text-gray-400">Nothing matches your search.</div>';
+        }).join('') : '<div class="p-8 text-center text-sm text-gray-400">No results match your search.</div>';
 
         renderDetail(list.find(g => g.name === state.selected));
     }
 
     function renderDetail(g) {
         const box = $('detail');
-        if (!g) { box.innerHTML = '<div class="p-12 text-center text-sm text-gray-400">Select an item on the left to see its interns.</div>'; return; }
+        if (!g) { box.innerHTML = '<div class="p-12 text-center text-sm text-gray-400">Select an entry from the list to view its interns.</div>'; return; }
 
         const subs = buildGroups(g.items, otherKey()).sort((a, b) => b.items.length - a.items.length || a.name.localeCompare(b.name));
         const counts = { Active: 0, Completed: 0 };
         g.items.forEach(r => counts[r.status] = (counts[r.status] || 0) + 1);
         const isSchool = state.view === 'school';
         const openLink = NONE.includes(g.name) ? '' :
-            `<a href="dashboard.php?${isSchool ? 'school' : 'search'}=${encodeURIComponent(g.name)}" class="shrink-0 rounded border border-gray-200 px-3 py-2 text-xs font-bold text-figmaBlue hover:bg-gray-50 print:hidden">Open in Intern Records</a>`;
-        const period = r => r.start && r.end ? `${esc(r.start)} - ${esc(r.end)}` : r.start ? `From ${esc(r.start)}` : r.end ? `Until ${esc(r.end)}` : '-';
+            `<a href="dashboard.php?${isSchool ? 'school' : 'search'}=${encodeURIComponent(g.name)}" class="shrink-0 rounded border border-gray-200 px-3 py-2 text-xs font-bold text-figmaBlue hover:bg-gray-50 print:hidden">View in Intern Records</a>`;
+        const period = r => r.start && r.end ? `${esc(r.start)} to ${esc(r.end)}` : r.start ? `Starting ${esc(r.start)}` : r.end ? `Ending ${esc(r.end)}` : '-';
 
         box.innerHTML = `
             <div class="flex items-start justify-between gap-4 border-b border-gray-100 p-6">
                 <div class="min-w-0">
                     <div class="text-xs font-medium text-gray-400">${isSchool ? 'School' : 'Department'}</div>
                     <h3 class="truncate text-2xl font-black text-gray-900">${esc(g.name)}</h3>
-                    <div class="mt-1 text-sm text-gray-500">${plural(g.items.length, 'intern')} across ${plural(subs.length, isSchool ? 'department' : 'school')}</div>
+                    <div class="mt-1 text-sm text-gray-500">${plural(g.items.length, 'intern')} assigned across ${plural(subs.length, isSchool ? 'department' : 'school')}</div>
                 </div>
                 ${openLink}
             </div>
@@ -202,7 +226,7 @@ page_start($pdo, 'Reports', 'reports');
                 ${Object.entries(counts).map(([s, n]) => `<div class="flex items-center gap-2 rounded-md border border-gray-200 bg-white px-3 py-1.5">${badge(s)}<span class="text-sm font-black text-gray-800">${n}</span></div>`).join('')}
             </div>
             <div class="space-y-4 p-6">
-                <div class="text-xs font-bold uppercase tracking-wider text-gray-400">${isSchool ? 'Interns grouped by department' : 'Interns grouped by school'}</div>
+                <div class="text-xs font-bold uppercase tracking-wider text-gray-400">${isSchool ? 'Interns Grouped by Department' : 'Interns Grouped by School'}</div>
                 ${subs.map(s => `
                 <details open class="overflow-hidden rounded-lg border border-gray-200">
                     <summary class="flex cursor-pointer items-center justify-between bg-gray-50 px-4 py-3 hover:bg-gray-100">
@@ -211,7 +235,7 @@ page_start($pdo, 'Reports', 'reports');
                     </summary>
                     <table class="w-full text-left">
                         <thead><tr class="border-b border-gray-100 text-[10px] font-bold uppercase tracking-wider text-gray-400">
-                            <th class="px-4 py-2">Name</th><th class="px-4 py-2">Course</th><th class="px-4 py-2">Batch</th><th class="px-4 py-2">Internship period</th><th class="px-4 py-2">Status</th>
+                            <th class="px-4 py-2">Intern Name</th><th class="px-4 py-2">Course</th><th class="px-4 py-2">Batch Year</th><th class="px-4 py-2">Internship Period</th><th class="px-4 py-2">Status</th>
                         </tr></thead>
                         <tbody class="divide-y divide-gray-100">
                             ${s.items.sort((a, b) => a.name.localeCompare(b.name)).map(r => `

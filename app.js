@@ -20,8 +20,8 @@ function resetDateErrors(form) {
 
 /**
  * Checks that the end date is not earlier than the start date.
- * Shows a message under the dates and returns true when everything is in order.
- * (The server runs the same check, so this is only for instant feedback.)
+ * Shows a message under the dates and returns true when the dates are in a valid sequence.
+ * (The server performs the same check; this only provides immediate feedback.)
  */
 function checkDates(form) {
     resetDateErrors(form);
@@ -33,7 +33,7 @@ function checkDates(form) {
         [start, end].forEach(el => el.classList.add('border-red-500', 'ring-1', 'ring-red-500'));
         const box = form.querySelector('[data-date-error]');
         if (box) {
-            box.textContent = 'Date conflict: the end date (' + fmtDate(end.value) + ') is earlier than the start date (' + fmtDate(start.value) + ').';
+            box.textContent = 'Invalid date range: the end date (' + fmtDate(end.value) + ') cannot be earlier than the start date (' + fmtDate(start.value) + ').';
             box.classList.remove('hidden');
         }
         return false;
@@ -63,7 +63,7 @@ function fillForm(prefix, data) {
  * Shows a confirmation dialog and returns a Promise that resolves to true (confirmed) or false (cancelled).
  * confirmDialog({ title, message, okLabel, danger }).then(ok => { ... })
  */
-function confirmDialog({ title = 'Are you sure?', message = '', okLabel = 'Confirm', danger = true } = {}) {
+function confirmDialog({ title = 'Confirm Action', message = '', okLabel = 'Confirm', danger = true } = {}) {
     return new Promise(resolve => {
         const overlay = document.createElement('div');
         overlay.className = 'fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4';
@@ -126,13 +126,13 @@ function confirmDialog({ title = 'Are you sure?', message = '', okLabel = 'Confi
 }
 
 // Any form with a data-confirm attribute asks first, e.g.
-// <form data-confirm="This can't be undone." data-confirm-title="Delete?" data-confirm-ok="Delete">
+// <form data-confirm="This action cannot be undone." data-confirm-title="Delete Record?" data-confirm-ok="Delete">
 document.addEventListener('submit', ev => {
     const form = ev.target;
     if (!form.dataset || !form.dataset.confirm) return;
     ev.preventDefault();
     confirmDialog({
-        title: form.dataset.confirmTitle || 'Are you sure?',
+        title: form.dataset.confirmTitle || 'Confirm Action',
         message: form.dataset.confirm,
         okLabel: form.dataset.confirmOk || 'Confirm',
     }).then(ok => { if (ok) form.submit(); });
@@ -147,7 +147,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const onDate = ev => {
             if (ev.target.type !== 'date') return;
             const server = form.querySelector('[data-server-errors]');
-            if (server) server.classList.add('hidden');   // the user is fixing it, so hide the old server message
+            if (server) server.classList.add('hidden');   // the user is correcting the dates, so hide the earlier server message
             checkDates(form);
         };
         form.addEventListener('input', onDate);
