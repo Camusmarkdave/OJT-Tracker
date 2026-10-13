@@ -19,23 +19,15 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $old = clean_intern_input($_POST);
     $old['status'] = 'Active'; // an admin may change the status during validation
 
-    // Basic throttle: 5 submissions per browser session per hour
-    $_SESSION['reg_log'] = array_values(array_filter($_SESSION['reg_log'] ?? [], fn($t) => $t > time() - 3600));
-
-    if (count($_SESSION['reg_log']) >= 5) {
-        $errors[] = 'Several registrations were submitted from this browser recently. Please try again later or contact the HR Department.';
-    } else {
-        $errors = validate_intern($old);
-        if (!$errors && find_duplicate($pdo, $old)) {
-            $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
-        }
-        if (!$errors) {
-            insert_intern($pdo, $old, 'Pending', 'register');
-            audit_log($pdo, 'registration_submitted', 'Registration submitted for ' . intern_summary($old) . '.',
-                ['id' => null, 'username' => 'Public registration', 'role' => null]);
-            $_SESSION['reg_log'][] = time();
-            redirect('register.php?submitted=1');
-        }
+    $errors = validate_intern($old);
+    if (!$errors && find_duplicate($pdo, $old)) {
+        $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
+    }
+    if (!$errors) {
+        insert_intern($pdo, $old, 'Pending', 'register');
+        audit_log($pdo, 'registration_submitted', 'Registration submitted for ' . intern_summary($old) . '.',
+            ['id' => null, 'username' => 'Public registration', 'role' => null]);
+        redirect('register.php?submitted=1');
     }
 }
 ?>

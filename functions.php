@@ -47,7 +47,30 @@ const PERMISSIONS = [
     'validation.delete'   => SUPER_ONLY,
     'account.manage_own'  => ALL_ROLES,
     'registration.manage' => SUPER_ONLY,
+    'users.manage'        => SUPER_ONLY,
     'audit.view'          => SUPER_ONLY,
+];
+
+/** Permission matrix grouped for display on Admin Accounts page. */
+const PERMISSION_GROUPS = [
+    'Intern Records' => [
+        'records.view'   => 'View intern records',
+        'records.add'    => 'Add new intern records',
+        'records.edit'   => 'Edit accepted intern records',
+        'records.delete' => 'Delete intern records',
+    ],
+    'Reports & Validation' => [
+        'reports.view'        => 'View reports and statistics',
+        'validation.view'     => 'View self-registration submissions',
+        'validation.review'   => 'Review submissions (approve, reject, edit)',
+        'validation.delete'   => 'Permanently delete submissions',
+    ],
+    'Administration' => [
+        'account.manage_own'  => 'Manage own profile and change password',
+        'registration.manage' => 'Open or close intern self-registration',
+        'users.manage'        => 'Manage administrator accounts',
+        'audit.view'          => 'View system audit logs',
+    ],
 ];
 
 /** Audit log activity types: key => [category, label, badge colour]. */
@@ -68,6 +91,10 @@ const AUDIT_ACTIONS = [
     'password_changed'       => ['Settings',       'Password changed',             'blue'],
     'registration_toggled'   => ['Settings',       'Registration setting changed', 'yellow'],
     'access_denied'          => ['Security',       'Access denied',                'red'],
+    'user_created'           => ['Accounts',       'Account created',              'green'],
+    'user_updated'           => ['Accounts',       'Account updated',              'blue'],
+    'user_deleted'           => ['Accounts',       'Account deleted',              'red'],
+    'password_reset'         => ['Accounts',       'Password reset',               'yellow'],
 ];
 const BADGE_CLS = [
     'green'  => 'bg-green-100 text-green-700',
@@ -573,6 +600,7 @@ function page_start(PDO $pdo, string $title, string $active): void {
     ];
     // Visible to Super Admins only
     $admin = [
+        ['accounts', 'accounts.php', 'Admin Accounts', 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z', 'users.manage'],
         ['audit', 'audit_logs.php', 'Audit Logs', 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01', 'audit.view'],
     ];
     $admin = array_values(array_filter($admin, fn($i) => can($i[4])));
