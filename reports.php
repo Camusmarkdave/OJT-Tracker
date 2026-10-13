@@ -269,3 +269,4 @@ page_start($pdo, 'Reports', 'reports');
 
 </body>
 </html>
+<!-- sample -->
