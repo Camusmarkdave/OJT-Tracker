@@ -53,6 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('success', "The registration of $name was returned to pending review.");
 
     } elseif ($act === 'delete') {
+        delete_intern_resume($rec); // remove the physical file before deleting the row
         $pdo->prepare("DELETE FROM interns WHERE id = ? AND validation_status <> 'Approved'")->execute([$id]);
         audit_log($pdo, 'validation_deleted', 'Permanently deleted the submission of ' . intern_summary($rec) . '.');
         flash('success', "The submission from $name was permanently deleted.");
@@ -83,16 +84,35 @@ foreach ($pdo->query("SELECT validation_status, COUNT(*) AS c FROM interns WHERE
     $counts[$r['validation_status']] = (int)$r['c'];
 }
 
-// Submissions for the current tab, with automated verification run on each one
+// Submissions for the current tab, with automated verification run on each one.
+// resume_file is intentionally excluded from the JSON sent to the browser; only has_resume (a boolean flag) is exposed.
 $list = $pdo->prepare("SELECT * FROM interns WHERE validation_status = ? ORDER BY created_at DESC, id DESC");
 $list->execute([$tab === 'rejected' ? 'Rejected' : 'Pending']);
 $records = [];
 foreach ($list->fetchAll() as $r) {
+    // If resume_file exists but resume_text is NULL, attempt lazy extraction once and cache it
+    if (!empty($r['resume_file']) && $r['resume_text'] === null) {
+        $filePath = RESUME_UPLOAD_DIR . '/' . basename($r['resume_file']);
+        if (is_file($filePath)) {
+            $extracted = extract_pdf_text($filePath);
+            $r['resume_text'] = $extracted;
+            $pdo->prepare("UPDATE interns SET resume_text = ? WHERE id = ?")->execute([$extracted, $r['id']]);
+        }
+    }
+
     $dup = find_duplicate($pdo, $r, (int)$r['id']);
     $r['issues']    = validate_intern($r);
     $r['duplicate'] = $dup ? ($dup['validation_status'] === 'Approved' ? 'an accepted record' : 'another pending submission') : null;
     $r['submitted'] = date('M j, Y g:i A', strtotime($r['created_at']));
     $r['reviewed']  = $r['validated_at'] ? date('M j, Y g:i A', strtotime($r['validated_at'])) : null;
+    $r['has_resume'] = !empty($r['resume_file']); // expose a boolean only — never the raw filename
+    $r['resume_name'] = $r['resume_name'] ?? null; // sanitised display name is safe to show
+
+    // Warning-only checks comparing typed fields with extracted resume text
+    $r['resume_verification'] = verify_resume_matches($r['resume_text'] ?? null, $r);
+
+    // Strip the stored filename and text so they are never sent to the browser
+    unset($r['resume_file'], $r['resume_text']);
     $records[(int)$r['id']] = $r;
 }
 
@@ -190,9 +210,9 @@ page_start($pdo, 'Validation', 'validation');
         </div>
     </main>
 
-<!-- Review modal: complete details first, then Approve / Reject / Edit -->
+<!-- Review modal: widened on large screens to accommodate the PDF panel side-by-side with the details -->
 <div id="reviewModal" data-modal class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden p-4">
-    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl relative overflow-y-auto max-h-[92vh]">
+    <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl xl:max-w-5xl relative overflow-y-auto max-h-[92vh]">
 
         <!-- Details view -->
         <div id="viewPane">
@@ -207,11 +227,40 @@ page_start($pdo, 'Validation', 'validation');
                 <button type="button" onclick="closeReview()" aria-label="Close" class="text-2xl leading-none text-gray-400 hover:text-gray-600">&times;</button>
             </div>
 
-            <div class="space-y-6 p-6">
-                <div id="rvChecks" class="space-y-2"></div>
-                <dl id="rvDetails" class="grid grid-cols-2 gap-x-6 gap-y-4"></dl>
-                <div id="rvReason" class="hidden rounded border-l-4 border-red-400 bg-red-50 p-3 text-sm text-red-700"></div>
-            </div>
+            <!-- Two-column layout on XL screens: left = checks + details, right = PDF viewer -->
+            <div class="xl:flex xl:divide-x xl:divide-gray-100">
+
+                <!-- Left column: verification + field details -->
+                <div class="xl:w-1/2 space-y-6 p-6">
+                    <div id="rvChecks" class="space-y-2"></div>
+                    <dl id="rvDetails" class="grid grid-cols-2 gap-x-6 gap-y-4"></dl>
+                    <div id="rvReason" class="hidden rounded border-l-4 border-red-400 bg-red-50 p-3 text-sm text-red-700"></div>
+                </div>
+
+                <!-- Right column: resume panel -->
+                <div class="xl:w-1/2 p-6 flex flex-col gap-3">
+                    <div class="text-xs font-bold text-gray-500 uppercase tracking-wider">RESUME</div>
+                    <!-- Shown when a resume exists -->
+                    <div id="rvResumePanel" class="hidden flex-col gap-2 flex-1">
+                        <div class="flex items-center justify-between">
+                            <span id="rvResumeName" class="text-xs text-gray-500 truncate"></span>
+                            <a id="rvResumeTab" href="#" target="_blank" rel="noopener"
+                               class="ml-2 shrink-0 rounded border border-figmaBlue px-3 py-1 text-[10px] font-bold text-figmaBlue hover:bg-figmaBlue hover:text-white transition">
+                                Open in new tab &nearr;
+                            </a>
+                        </div>
+                        <iframe id="rvResumeFrame" src="" title="Intern resume"
+                            class="w-full rounded border border-gray-200 bg-gray-50"
+                            style="height:420px">
+                        </iframe>
+                    </div>
+                    <!-- Shown when no resume was attached -->
+                    <div id="rvNoResume" class="hidden rounded bg-gray-50 border border-gray-200 px-4 py-3 text-sm text-gray-400">
+                        No resume attached.
+                    </div>
+                </div>
+
+            </div><!-- end xl:flex -->
 
             <?php if ($canReview): ?>
             <!-- Reject: an optional reason is requested first -->
@@ -321,7 +370,27 @@ page_start($pdo, 'Validation', 'validation');
         // Automated verification, so problems are visible at a glance
         const items = r.issues.length ? r.issues.map(t => ['bad', t]) : [['ok', 'All required information is complete and the dates are in a valid sequence.']];
         if (r.duplicate) items.push(['warn', 'A record with the same name and batch year already exists (' + r.duplicate + '). Please confirm that this is not a duplicate submission.']);
-        const style = { ok: ['bg-green-50 text-green-700', '&#10003;'], bad: ['bg-red-50 text-red-700', '&#10005;'], warn: ['bg-yellow-50 text-yellow-800', '!'] };
+
+        // Resume text checks: warning-only and neutral note (never added to r.issues, never blocks approval)
+        if (r.resume_verification && r.resume_verification.has_resume) {
+            const rv = r.resume_verification;
+            if (!rv.readable && rv.note) {
+                // Neutral note for unreadable/scanned PDF
+                items.push(['neutral', rv.note]);
+            } else if (rv.warnings && rv.warnings.length > 0) {
+                // Yellow warnings for missing matches
+                rv.warnings.forEach(w => items.push(['warn', w]));
+            } else if (rv.all_matched) {
+                items.push(['ok', 'Entered name, school, and course were found in the resume.']);
+            }
+        }
+
+        const style = {
+            ok:      ['bg-green-50 text-green-700', '&#10003;'],
+            bad:     ['bg-red-50 text-red-700', '&#10005;'],
+            warn:    ['bg-yellow-50 text-yellow-800', '!'],
+            neutral: ['bg-gray-100 text-gray-700', '&#8505;']
+        };
         $('rvChecks').innerHTML = '<div class="text-xs font-bold text-gray-500">AUTOMATED VERIFICATION</div>' +
             items.map(([k, t]) => `<div class="flex items-start gap-2 rounded px-3 py-2 text-sm ${style[k][0]}"><span class="font-black">${style[k][1]}</span><span>${esc(t)}</span></div>`).join('');
 
@@ -336,6 +405,23 @@ page_start($pdo, 'Validation', 'validation');
         const reason = $('rvReason');
         reason.classList.toggle('hidden', !(r.validation_status === 'Rejected'));
         reason.textContent = 'Reason for rejection: ' + (r.rejection_reason || 'No reason provided.');
+
+        // Resume panel: show the embedded viewer when a resume exists; show neutral note otherwise.
+        // The Approve button is NOT disabled just because there is no resume.
+        const resumeUrl = 'resume.php?id=' + id;
+        if (r.has_resume) {
+            $('rvResumeFrame').src = resumeUrl;
+            $('rvResumeTab').href  = resumeUrl;
+            $('rvResumeName').textContent = r.resume_name || 'resume.pdf';
+            $('rvResumePanel').classList.remove('hidden');
+            $('rvResumePanel').style.display = 'flex';
+            $('rvNoResume').classList.add('hidden');
+        } else {
+            $('rvResumeFrame').src = '';
+            $('rvResumePanel').classList.add('hidden');
+            $('rvResumePanel').style.display = '';
+            $('rvNoResume').classList.remove('hidden');
+        }
 
         if (CAN_REVIEW) {
             $('approveBtn').disabled = r.issues.length > 0;

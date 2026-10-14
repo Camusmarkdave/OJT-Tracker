@@ -8,26 +8,110 @@ $open      = setting('registration_open') === '1';
 $submitted = isset($_GET['submitted']);
 $errors    = [];
 $old       = [];
+$resumeHint = ''; // non-empty when the user must reselect the file after a validation error
 
 if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    csrf_verify();
 
-    if (!empty($_POST['website'])) { // honeypot: genuine users never complete this hidden field
-        redirect('register.php?submitted=1');
-    }
+    // Detect post_max_size overflow: PHP silently empties $_POST when the body
+    // exceeds post_max_size, which would make csrf_verify() show a misleading
+    // "session expired" error.  Detect this case first and show a clear message.
+    if (empty($_POST) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+        $errors[] = 'The uploaded file exceeds the maximum allowed request size. Please reduce the file size and try again.';
+    } else {
+        csrf_verify();
 
-    $old = clean_intern_input($_POST);
-    $old['status'] = 'Active'; // an admin may change the status during validation
+        if (!empty($_POST['website'])) { // honeypot: genuine users never complete this hidden field
+            redirect('register.php?submitted=1');
+        }
 
-    $errors = validate_intern($old);
-    if (!$errors && find_duplicate($pdo, $old)) {
-        $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
-    }
-    if (!$errors) {
-        insert_intern($pdo, $old, 'Pending', 'register');
-        audit_log($pdo, 'registration_submitted', 'Registration submitted for ' . intern_summary($old) . '.',
-            ['id' => null, 'username' => 'Public registration', 'role' => null]);
-        redirect('register.php?submitted=1');
+        $old = clean_intern_input($_POST);
+        $old['status'] = 'Active'; // an admin may change the status during validation
+
+        $errors = validate_intern($old);
+        if (!$errors && find_duplicate($pdo, $old)) {
+            $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
+        }
+
+        // --- Resume upload validation ---
+        $resumeData = null; // will be populated on a clean upload
+        $hasUpload  = isset($_FILES['resume']) && $_FILES['resume']['error'] !== UPLOAD_ERR_NO_FILE;
+
+        if ($hasUpload) {
+            $f = $_FILES['resume'];
+
+            if ($f['error'] !== UPLOAD_ERR_OK) {
+                if ($f['error'] === UPLOAD_ERR_INI_SIZE || $f['error'] === UPLOAD_ERR_FORM_SIZE) {
+                    $errors[] = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+                } else {
+                    $errors[] = 'The resume file could not be uploaded. Please try again.';
+                }
+            } elseif ($f['size'] > RESUME_MAX_BYTES) {
+                $errors[] = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+            } else {
+                // Extension check
+                $origName = $f['name'];
+                $ext      = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                if ($ext !== 'pdf') {
+                    $errors[] = 'Only PDF files are accepted for the resume. Please select a file with a .pdf extension.';
+                } else {
+                    // Real MIME type via finfo
+                    $finfo    = new finfo(FILEINFO_MIME_TYPE);
+                    $mimeType = $finfo->file($f['tmp_name']);
+                    if ($mimeType !== 'application/pdf') {
+                        $errors[] = 'The uploaded file does not appear to be a valid PDF. Please upload a genuine PDF document.';
+                    } else {
+                        // Magic-byte check: a PDF must start with "%PDF"
+                        $handle = fopen($f['tmp_name'], 'rb');
+                        $magic  = fread($handle, 4);
+                        fclose($handle);
+                        if ($magic !== '%PDF') {
+                            $errors[] = 'The uploaded file does not appear to be a valid PDF. Please upload a genuine PDF document.';
+                        } else {
+                            // Sanitise the original name for display only (never used for paths)
+                            $safeName = mb_substr(preg_replace('/[^\w.\- ]/', '_', basename($origName)), 0, 255);
+                            $resumeData = ['tmpName' => $f['tmp_name'], 'name' => $safeName];
+                        }
+                    }
+                }
+            }
+
+            // The file input cannot be re-filled by the browser after a round-trip;
+            // tell the intern to reselect it if there were other errors too.
+            if ($errors) {
+                $resumeHint = 'The resume file you selected was not retained. Please reselect your resume file before submitting again.';
+            }
+        }
+
+        if (!$errors) {
+            // Move the file to permanent storage before inserting the DB row.
+            $resume = null;
+            if ($resumeData !== null) {
+                $dir = RESUME_UPLOAD_DIR;
+                if (!is_dir($dir)) { @mkdir($dir, 0750, true); }
+                $storedName = bin2hex(random_bytes(16)) . '.pdf';
+                $destPath   = $dir . '/' . $storedName;
+                if (!move_uploaded_file($resumeData['tmpName'], $destPath)) {
+                    // Storage failure is treated as a non-fatal issue: the record is saved without a resume.
+                    $errors[] = 'The resume file could not be saved due to a server error. Please try submitting again, or contact the HR Department for assistance.';
+                } else {
+                    $resumeText = extract_pdf_text($destPath);
+                    $resume = ['file' => $storedName, 'name' => $resumeData['name'], 'text' => $resumeText];
+                }
+            }
+
+            if (!$errors) {
+                insert_intern($pdo, $old, 'Pending', 'register', $resume);
+                $detail = 'Registration submitted for ' . intern_summary($old) . '.';
+                if ($resume) { $detail .= ' Resume attached: ' . $resume['name'] . '.'; }
+                audit_log($pdo, 'registration_submitted', $detail,
+                    ['id' => null, 'username' => 'Public registration', 'role' => null]);
+                if ($resume) {
+                    audit_log($pdo, 'resume_uploaded', 'Resume uploaded during registration for ' . intern_summary($old) . '.',
+                        ['id' => null, 'username' => 'Public registration', 'role' => null]);
+                }
+                redirect('register.php?submitted=1');
+            }
+        }
     }
 }
 ?>
@@ -65,7 +149,7 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
         <p class="mb-10 max-w-xs text-sm leading-relaxed text-blue-100">Submit your information to be included in the official OJT intern records.</p>
 
         <ol class="space-y-5 text-sm">
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">1</span><span class="text-blue-100"><b class="text-white">Submit your information.</b><br>Provide your school, course, department, and internship dates.</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">1</span><span class="text-blue-100"><b class="text-white">Submit your information.</b><br>Provide your school, course, department, and internship dates. You may also attach your resume.</span></li>
           <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">2</span><span class="text-blue-100"><b class="text-white">HR Department review.</b><br>Your submission is verified and corrected where necessary.</span></li>
           <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">3</span><span class="text-blue-100"><b class="text-white">Record accepted.</b><br>Once approved, your information becomes part of the official records.</span></li>
         </ol>
@@ -102,15 +186,26 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="mb-2 text-xs font-bold tracking-widest text-green-600">NEW INTERN</div>
             <h2 class="mb-6 text-3xl font-extrabold uppercase leading-none text-figmaDark">Registration Form</h2>
 
-            <form method="POST" action="register.php" <?php echo form_attrs(); ?> class="space-y-4">
+            <form method="POST" action="register.php" enctype="multipart/form-data" <?php echo form_attrs(); ?> class="space-y-4">
                 <?php echo csrf_field(); ?>
                 <div class="hidden" aria-hidden="true"><input type="text" name="website" tabindex="-1" autocomplete="off"></div>
 
                 <?php intern_fields($pdo, 'reg_', $old, ['status' => false, 'errors' => $errors]); ?>
 
+                <!-- Resume upload (optional) -->
+                <div>
+                    <label class="<?php echo LABEL_CLS; ?>" for="reg_resume">RESUME (OPTIONAL — PDF ONLY, MAX <?php echo RESUME_MAX_BYTES / 1024 / 1024; ?> MB)</label>
+                    <input type="file" name="resume" id="reg_resume" accept=".pdf,application/pdf"
+                        class="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-figmaBlue file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-blue-900 focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <?php if ($resumeHint): ?>
+                    <p class="mt-1 text-xs text-yellow-700 font-medium"><?php echo e($resumeHint); ?></p>
+                    <?php endif; ?>
+                    <p class="mt-1 text-[11px] text-gray-400">Attaching a resume is optional. If provided, it will be reviewed by HR and stored securely.</p>
+                </div>
+
                 <label class="flex items-start gap-3 rounded border border-gray-200 bg-white p-3 text-xs text-gray-600">
                     <input type="checkbox" required class="mt-0.5 h-4 w-4 accent-[#15458A]">
-                    <span>I certify that the information provided is accurate and complete, and I understand that it will be reviewed by the HR Department before it is accepted.</span>
+                    <span>I certify that the information provided is accurate and complete, and I understand that it will be reviewed by the HR Department before it is accepted. Any resume I attach will be stored securely and reviewed by HR.</span>
                 </label>
 
                 <div class="flex items-center justify-between border-t border-gray-200 pt-4">

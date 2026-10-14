@@ -13,6 +13,11 @@ const STATUS_CLS = [
     'Completed' => 'bg-blue-100 text-figmaBlue',
 ];
 
+// Resume upload storage: absolute path to a folder OUTSIDE the web root.
+// If you must place this inside the web root, the ensure_schema() call creates a .htaccess that denies all requests.
+const RESUME_UPLOAD_DIR = __DIR__ . '/../intern_uploads/resumes';
+const RESUME_MAX_BYTES  = 5 * 1024 * 1024; // 5 MB
+
 /* ------------------------------------------------------------------ */
 /* Roles and permissions                                               */
 /* ------------------------------------------------------------------ */
@@ -87,6 +92,8 @@ const AUDIT_ACTIONS = [
     'validation_edited'      => ['Validation',     'Submission edited',            'blue'],
     'validation_reopened'    => ['Validation',     'Returned to pending',          'yellow'],
     'validation_deleted'     => ['Validation',     'Submission deleted',           'red'],
+    'resume_uploaded'        => ['Validation',     'Resume uploaded',              'blue'],
+    'resume_viewed'          => ['Validation',     'Resume viewed',                'gray'],
     'profile_updated'        => ['Settings',       'Profile updated',              'blue'],
     'password_changed'       => ['Settings',       'Password changed',             'blue'],
     'registration_toggled'   => ['Settings',       'Registration setting changed', 'yellow'],
@@ -270,7 +277,7 @@ function ensure_schema(PDO $pdo): void {
     } catch (PDOException $ex) {
         $v = false; // settings table doesn't exist yet
     }
-    if ($v === '5') { return; }
+    if ($v === '7') { return; }
 
     $has = fn($t, $c) => (bool)$pdo->query("SHOW COLUMNS FROM `$t` LIKE '$c'")->fetch();
 
@@ -330,7 +337,34 @@ function ensure_schema(PDO $pdo): void {
             ->execute([DEFAULT_ADMIN_USERNAME, password_hash(DEFAULT_ADMIN_PASSWORD, PASSWORD_DEFAULT), DEFAULT_ADMIN_NAME, ROLE_ADMIN]);
     }
 
-    save_setting($pdo, 'schema_version', '5');
+    // Schema v6: optional resume columns (safe to run against a v5 database).
+    if (!$has('interns', 'resume_file')) {
+        $pdo->exec("ALTER TABLE interns
+            ADD resume_file VARCHAR(100) NULL,
+            ADD resume_name VARCHAR(255) NULL,
+            ADD resume_uploaded_at DATETIME NULL");
+    }
+
+    // Schema v7: extracted resume text (safe to run against a v5 or v6 database).
+    if (!$has('interns', 'resume_text')) {
+        $pdo->exec("ALTER TABLE interns ADD resume_text MEDIUMTEXT NULL");
+    }
+
+    // Ensure the resume upload directory exists and is protected if it ended up inside the web root.
+    $dir = RESUME_UPLOAD_DIR;
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0750, true);
+    }
+    // If the directory is under the document root, add a .htaccess guard.
+    $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/\\');
+    if ($docRoot !== '' && str_starts_with(realpath($dir) ?: $dir, $docRoot)) {
+        $htaccess = $dir . '/.htaccess';
+        if (!file_exists($htaccess)) {
+            file_put_contents($htaccess, "deny from all\n");
+        }
+    }
+
+    save_setting($pdo, 'schema_version', '7');
 }
 
 function setting(string $key, ?string $default = null): ?string {
@@ -447,16 +481,35 @@ function validate_intern(array $d): array {
     return $err;
 }
 
-function insert_intern(PDO $pdo, array $d, string $validation = 'Approved', string $via = 'admin'): void {
+/**
+ * Insert a new intern record.  The optional $resume array may contain:
+ *   'file'        => stored filename (random, e.g. 'abc123.pdf')
+ *   'name'        => sanitised original filename shown to admins
+ *   'text'        => extracted plain text (nullable; NULL means no readable text)
+ * Pass null (the default) to insert without a resume.
+ */
+function insert_intern(PDO $pdo, array $d, string $validation = 'Approved', string $via = 'admin', ?array $resume = null): void {
     // validated_at is stamped by the database clock so it matches created_at
     $validatedAt = $validation === 'Approved' ? 'NOW()' : 'NULL';
-    $pdo->prepare("INSERT INTO interns
-        (first_name, last_name, course, school, department, start_date, end_date, batch_year, status, validation_status, submitted_via, validated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,$validatedAt)")
-        ->execute([
-            $d['first_name'], $d['last_name'], $d['course'] ?: null, $d['school'] ?: null, $d['department'],
-            $d['start_date'], $d['end_date'], (int)$d['batch_year'], $d['status'], $validation, $via,
-        ]);
+    if ($resume) {
+        $pdo->prepare("INSERT INTO interns
+            (first_name, last_name, course, school, department, start_date, end_date, batch_year, status,
+             validation_status, submitted_via, validated_at, resume_file, resume_name, resume_uploaded_at, resume_text)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,$validatedAt,?,?,NOW(),?)")
+            ->execute([
+                $d['first_name'], $d['last_name'], $d['course'] ?: null, $d['school'] ?: null, $d['department'],
+                $d['start_date'], $d['end_date'], (int)$d['batch_year'], $d['status'], $validation, $via,
+                $resume['file'], $resume['name'], $resume['text'] ?? null,
+            ]);
+    } else {
+        $pdo->prepare("INSERT INTO interns
+            (first_name, last_name, course, school, department, start_date, end_date, batch_year, status, validation_status, submitted_via, validated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,$validatedAt)")
+            ->execute([
+                $d['first_name'], $d['last_name'], $d['course'] ?: null, $d['school'] ?: null, $d['department'],
+                $d['start_date'], $d['end_date'], (int)$d['batch_year'], $d['status'], $validation, $via,
+            ]);
+    }
 }
 
 function update_intern(PDO $pdo, int $id, array $d): void {
@@ -465,6 +518,120 @@ function update_intern(PDO $pdo, int $id, array $d): void {
             $d['first_name'], $d['last_name'], $d['course'] ?: null, $d['school'] ?: null, $d['department'],
             $d['start_date'], $d['end_date'], (int)$d['batch_year'], $d['status'], $id,
         ]);
+}
+
+/**
+ * Deletes the physical resume file for the given intern record (if one exists).
+ * Silently ignores missing files.  Call this before deleting the DB row.
+ */
+function delete_intern_resume(array $row): void {
+    $file = $row['resume_file'] ?? null;
+    if ($file === null || $file === '') { return; }
+    // Strip any path components so the stored value can never escape the upload directory.
+    $safe = basename($file);
+    $path = RESUME_UPLOAD_DIR . '/' . $safe;
+    if (is_file($path)) {
+        @unlink($path);
+    }
+}
+
+/**
+ * Extracts plain text from a PDF file using Smalot\PdfParser.
+ * Returns the extracted plain text, or null if unreadable, image-only (scan), or empty.
+ */
+function extract_pdf_text(string $filePath): ?string {
+    if (!is_file($filePath)) {
+        return null;
+    }
+    $autoload = __DIR__ . '/vendor/autoload.php';
+    if (file_exists($autoload)) {
+        require_once $autoload;
+    }
+    if (!class_exists('\\Smalot\\PdfParser\\Parser')) {
+        return null;
+    }
+    try {
+        $parser = new \Smalot\PdfParser\Parser();
+        $pdf    = $parser->parseFile($filePath);
+        $text   = trim($pdf->getText());
+        return $text !== '' ? $text : null;
+    } catch (\Throwable $e) {
+        error_log('PDF text extraction error: ' . $e->getMessage());
+        return null;
+    }
+}
+
+/**
+ * Normalizes text for comparison:
+ * - strips accents / diacritics (e.g. "José" -> "jose", "Peña" -> "pena")
+ * - converts to lowercase
+ * - collapses consecutive whitespace into a single space
+ */
+function normalize_check_text(string $text): string {
+    if (class_exists('Normalizer')) {
+        $text = \Normalizer::normalize($text, \Normalizer::FORM_D);
+        $text = preg_replace('/\p{M}/u', '', $text);
+    } else {
+        $text = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $text) ?: $text;
+    }
+    $text = mb_strtolower($text, 'UTF-8');
+    return trim(preg_replace('/\s+/', ' ', $text));
+}
+
+/**
+ * Compares typed first name, last name, school, and course against the extracted resume text.
+ * Warning-only: returns warnings for missing matches and a neutral note if the PDF has no readable text.
+ *
+ * @param ?string $resumeText
+ * @param array   $intern
+ * @return array{has_resume: bool, readable: bool, warnings: string[], note: ?string, all_matched: bool}
+ */
+function verify_resume_matches(?string $resumeText, array $intern): array {
+    $hasResume = !empty($intern['resume_file']) || !empty($intern['has_resume']);
+    if (!$hasResume) {
+        return ['has_resume' => false, 'readable' => false, 'warnings' => [], 'note' => null, 'all_matched' => false];
+    }
+
+    if ($resumeText === null || trim($resumeText) === '') {
+        return [
+            'has_resume'  => true,
+            'readable'    => false,
+            'warnings'    => [],
+            'note'        => 'The resume text could not be read automatically. Please review it manually.',
+            'all_matched' => false,
+        ];
+    }
+
+    $normResume = normalize_check_text($resumeText);
+    $warnings = [];
+
+    $fields = [
+        'first_name' => 'The first name entered was not found in the resume.',
+        'last_name'  => 'The last name entered was not found in the resume.',
+        'school'     => 'The school entered was not found in the resume.',
+        'course'     => 'The course entered was not found in the resume.',
+    ];
+
+    $checkedCount = 0;
+    foreach ($fields as $field => $warningMsg) {
+        $val = trim((string)($intern[$field] ?? ''));
+        if ($val === '') {
+            continue;
+        }
+        $checkedCount++;
+        $normVal = normalize_check_text($val);
+        if ($normVal === '' || !str_contains($normResume, $normVal)) {
+            $warnings[] = $warningMsg;
+        }
+    }
+
+    return [
+        'has_resume'  => true,
+        'readable'    => true,
+        'warnings'    => $warnings,
+        'note'        => null,
+        'all_matched' => ($checkedCount > 0 && count($warnings) === 0),
+    ];
 }
 
 /** Finds another (non-rejected) record with the same name and batch year. */

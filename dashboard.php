@@ -59,6 +59,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $st = $pdo->prepare("SELECT * FROM interns WHERE id = ?");
         $st->execute([$id]);
         if ($row = $st->fetch()) {
+            delete_intern_resume($row); // remove physical file before deleting the row
             $pdo->prepare("DELETE FROM interns WHERE id = ?")->execute([$id]);
             audit_log($pdo, 'intern_deleted', 'Deleted intern record: ' . intern_summary($row) . '.');
             flash('success', 'The intern record for ' . $row['first_name'] . ' ' . $row['last_name'] . ' was deleted.');
