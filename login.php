@@ -90,7 +90,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
           KHATE<br>Knowledge Hub for Administration and Tracking of <br><span class="text-figmaYellow">Employees-in-training.</span>
         </h1>
         <p class="mb-12 max-w-sm text-sm text-blue-100 leading-relaxed">
-          A centralized OJT management system for maintaining intern records, schools, departments, and internship schedules.
+          A centralized Intern management system for maintaining intern records, schools, departments, and internship schedules.
         </p>
       </div>
 
