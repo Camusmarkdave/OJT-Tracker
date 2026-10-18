@@ -49,9 +49,9 @@ if (!is_file($path) || !is_readable($path)) {
     exit('The resume file could not be found on the server.');
 }
 
-// Log the access before streaming.
+// Log the access before streaming (rate-limited to once per user per record per 10 minutes).
 $displayName = trim($row['first_name'] . ' ' . $row['last_name']);
-audit_log($pdo, 'resume_viewed', 'Viewed resume for intern record #' . $id . ' (' . $displayName . ').');
+audit_log_resume_viewed($pdo, $id, $displayName);
 
 // Stream the file.
 $size = filesize($path);

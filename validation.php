@@ -33,7 +33,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($act === 'approve') {
         $issues = validate_intern($rec);
         if ($issues) {
-            flash('error', "The submission from $name cannot be approved yet. " . implode(' ', $issues) . ' Please use Edit to correct the record first.');
+            $hasMissingDept = trim((string)($rec['department'] ?? '')) === '';
+            $msg = $hasMissingDept
+                ? "The submission from $name cannot be approved yet. Please use Edit to fill in the department and other required fields before approving."
+                : "The submission from $name cannot be approved yet. " . implode(' ', $issues) . ' Please use Edit to correct the record first.';
+            flash('error', $msg);
         } else {
             $approve();
             audit_log($pdo, 'validation_approved', 'Approved the registration of ' . intern_summary($rec) . '.');
@@ -61,6 +65,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($act === 'edit') {
         $d = clean_intern_input($_POST);
         $errs = validate_intern($d);
+
+        // Check if HR uploaded a resume file
+        $hasResumeUpload = isset($_FILES['resume']) && $_FILES['resume']['error'] !== UPLOAD_ERR_NO_FILE;
+        if ($hasResumeUpload && !$errs) {
+            $resumeErr = save_intern_resume($pdo, $id, $_FILES['resume']);
+            if ($resumeErr) {
+                $errs[] = $resumeErr;
+            }
+        }
+
         if ($errs) {
             $reopen = ['id' => $id, 'data' => $d, 'errors' => $errs];
         } else {
@@ -90,13 +104,27 @@ $list = $pdo->prepare("SELECT * FROM interns WHERE validation_status = ? ORDER B
 $list->execute([$tab === 'rejected' ? 'Rejected' : 'Pending']);
 $records = [];
 foreach ($list->fetchAll() as $r) {
-    // If resume_file exists but resume_text is NULL, attempt lazy extraction once and cache it
-    if (!empty($r['resume_file']) && $r['resume_text'] === null) {
+    // Lazy resume-text extraction: attempt only when status is NULL (i.e. never tried yet).
+    // 'done', 'empty', and 'failed' are all terminal states that must not be retried on every page load.
+    if (!empty($r['resume_file']) && $r['resume_text_status'] === null) {
         $filePath = RESUME_UPLOAD_DIR . '/' . basename($r['resume_file']);
         if (is_file($filePath)) {
-            $extracted = extract_pdf_text($filePath);
-            $r['resume_text'] = $extracted;
-            $pdo->prepare("UPDATE interns SET resume_text = ? WHERE id = ?")->execute([$extracted, $r['id']]);
+            try {
+                $extracted = extract_pdf_text($filePath);
+                if ($extracted !== null && trim($extracted) !== '') {
+                    $r['resume_text']        = $extracted;
+                    $r['resume_text_status'] = 'done';
+                } else {
+                    $r['resume_text']        = null;
+                    $r['resume_text_status'] = 'empty';
+                }
+            } catch (\Throwable $ex) {
+                error_log('InternTrack: PDF extraction failed for intern #' . $r['id'] . ': ' . $ex->getMessage());
+                $r['resume_text']        = null;
+                $r['resume_text_status'] = 'failed';
+            }
+            $pdo->prepare("UPDATE interns SET resume_text = ?, resume_text_status = ? WHERE id = ?")
+                ->execute([$r['resume_text'], $r['resume_text_status'], $r['id']]);
         }
     }
 
@@ -112,7 +140,7 @@ foreach ($list->fetchAll() as $r) {
     $r['resume_verification'] = verify_resume_matches($r['resume_text'] ?? null, $r);
 
     // Strip the stored filename and text so they are never sent to the browser
-    unset($r['resume_file'], $r['resume_text']);
+    unset($r['resume_file'], $r['resume_text'], $r['resume_text_status']);
     $records[(int)$r['id']] = $r;
 }
 
@@ -187,7 +215,7 @@ page_start($pdo, 'Validation', 'validation');
                                 </div>
                             </td>
                             <td class="p-4 text-sm text-gray-600"><?php echo e($r['school'] ?: '-'); ?></td>
-                            <td class="p-4 text-sm text-gray-600"><?php echo e($r['department']); ?></td>
+                            <td class="p-4 text-sm text-gray-600"><?php echo e(trim((string)$r['department']) !== '' ? $r['department'] : 'Not yet assigned'); ?></td>
                             <td class="p-4 text-xs text-gray-500"><?php echo e($r['submitted']); ?></td>
                             <td class="p-4">
                                 <?php if ($tab === 'rejected'): ?>
@@ -285,10 +313,11 @@ page_start($pdo, 'Validation', 'validation');
                         <button type="button" onclick="showReject()" class="rounded border border-red-300 bg-white px-4 py-2 text-xs font-bold text-red-600 hover:bg-red-50">&#10005; REJECT</button>
                         <button type="button" onclick="showEdit()" class="rounded border border-figmaBlue bg-white px-4 py-2 text-xs font-bold text-figmaBlue hover:bg-blue-50">&#9998; EDIT</button>
                     </div>
-                    <form method="POST" action="<?php echo e($formAction); ?>">
+                    <form method="POST" action="<?php echo e($formAction); ?>" class="flex items-center gap-3">
                         <?php echo csrf_field(); ?>
                         <input type="hidden" name="action" value="approve">
                         <input type="hidden" name="id" class="rid">
+                        <span id="approveDisabledMsg" class="hidden text-xs text-red-600 font-medium"></span>
                         <button type="submit" id="approveBtn" class="rounded bg-[#0fb871] px-5 py-2 text-xs font-bold text-white hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-40">&#10003; APPROVE</button>
                     </form>
                 </div>
@@ -320,7 +349,7 @@ page_start($pdo, 'Validation', 'validation');
 
         <?php if ($canReview): ?>
         <!-- Edit view -->
-        <form id="editPane" method="POST" action="<?php echo e($formAction); ?>" <?php echo form_attrs(); ?> class="hidden">
+        <form id="editPane" method="POST" action="<?php echo e($formAction); ?>" enctype="multipart/form-data" <?php echo form_attrs(); ?> class="hidden">
             <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="edit">
             <input type="hidden" name="id" class="rid">
@@ -330,6 +359,19 @@ page_start($pdo, 'Validation', 'validation');
             </div>
             <div class="space-y-4 p-6">
                 <?php intern_fields($pdo, 'rv_', $reopen['data'] ?? [], ['errors' => $reopen['errors'] ?? []]); ?>
+
+                <!-- Resume upload / replacement -->
+                <div class="rounded-md border border-gray-200 bg-gray-50/70 p-4">
+                    <label class="<?php echo LABEL_CLS; ?>" for="rv_resume">ATTACH / REPLACE RESUME (PDF ONLY, MAX <?php echo RESUME_MAX_BYTES / 1024 / 1024; ?> MB)</label>
+                    <div id="rvEditResumeCurrent" class="hidden mb-2 text-xs text-gray-600 flex items-center gap-2">
+                        <span class="font-bold text-gray-500">Current Resume:</span>
+                        <span id="rvEditResumeName" class="font-medium text-figmaBlue"></span>
+                        <span class="text-gray-400">(uploading a new file will replace this)</span>
+                    </div>
+                    <input type="file" name="resume" id="rv_resume" accept=".pdf,application/pdf"
+                        class="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-figmaBlue file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-blue-900 focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                    <p class="mt-1 text-[11px] text-gray-400">Attach a resume to this intern's record if one was submitted late or needs updating.</p>
+                </div>
             </div>
             <div class="flex items-center justify-between gap-3 border-t bg-gray-50 p-4">
                 <button type="button" onclick="showView()" class="text-xs font-bold text-gray-500 hover:text-figmaBlue">&larr; Back to details</button>
@@ -367,8 +409,20 @@ page_start($pdo, 'Validation', 'validation');
         $('rvName').textContent = r.first_name + ' ' + r.last_name;
         $('rvMeta').textContent = 'Submitted ' + r.submitted + (r.reviewed ? ' | Reviewed ' + r.reviewed : '');
 
+        const hasMissingDept = !r.department || r.department.trim() === '';
+
         // Automated verification, so problems are visible at a glance
-        const items = r.issues.length ? r.issues.map(t => ['bad', t]) : [['ok', 'All required information is complete and the dates are in a valid sequence.']];
+        let items = [];
+        if (r.issues.length) {
+            items = r.issues.map(t => {
+                if (hasMissingDept && t.toLowerCase().includes('department')) {
+                    return ['bad', 'Department is required. Please use Edit to fill in the department and other required fields before approving.'];
+                }
+                return ['bad', t];
+            });
+        } else {
+            items = [['ok', 'All required information is complete and the dates are in a valid sequence.']];
+        }
         if (r.duplicate) items.push(['warn', 'A record with the same name and batch year already exists (' + r.duplicate + '). Please confirm that this is not a duplicate submission.']);
 
         // Resume text checks: warning-only and neutral note (never added to r.issues, never blocks approval)
@@ -394,13 +448,21 @@ page_start($pdo, 'Validation', 'validation');
         $('rvChecks').innerHTML = '<div class="text-xs font-bold text-gray-500">AUTOMATED VERIFICATION</div>' +
             items.map(([k, t]) => `<div class="flex items-start gap-2 rounded px-3 py-2 text-sm ${style[k][0]}"><span class="font-black">${style[k][1]}</span><span>${esc(t)}</span></div>`).join('');
 
+        const deptDisplay = (r.department && r.department.trim() !== '') ? esc(r.department) : 'Not yet assigned';
+        const batchYearDisplay = esc(r.batch_year) + (hasMissingDept ? ' (Set by HR)' : '');
+
         const fields = [
-            ['School', r.school], ['Course', r.course], ['Department', r.department], ['Batch Year', r.batch_year],
-            ['Status', r.status], ['Internship Duration', duration(r)],
-            ['Start Date', fmt(r.start_date)], ['End Date', fmt(r.end_date)],
+            ['School', esc(r.school) || '-'],
+            ['Course', esc(r.course) || '-'],
+            ['Department', deptDisplay],
+            ['Batch Year', batchYearDisplay],
+            ['Status', esc(r.status) || '-'],
+            ['Internship Duration', duration(r)],
+            ['Start Date', fmt(r.start_date)],
+            ['End Date', fmt(r.end_date)],
         ];
         $('rvDetails').innerHTML = fields.map(([k, v]) =>
-            `<div><dt class="text-[10px] font-bold uppercase tracking-wider text-gray-400">${k}</dt><dd class="mt-0.5 text-sm font-semibold text-gray-800">${esc(v) || '-'}</dd></div>`).join('');
+            `<div><dt class="text-[10px] font-bold uppercase tracking-wider text-gray-400">${k}</dt><dd class="mt-0.5 text-sm font-semibold text-gray-800">${v}</dd></div>`).join('');
 
         const reason = $('rvReason');
         reason.classList.toggle('hidden', !(r.validation_status === 'Rejected'));
@@ -424,8 +486,22 @@ page_start($pdo, 'Validation', 'validation');
         }
 
         if (CAN_REVIEW) {
-            $('approveBtn').disabled = r.issues.length > 0;
-            $('approveBtn').title = r.issues.length ? 'Correct the issues using Edit before approving' : '';
+            const hasIssues = r.issues.length > 0;
+            $('approveBtn').disabled = hasIssues;
+            const disabledMsg = hasMissingDept
+                ? 'Please use Edit to fill in the department and other required fields before approving.'
+                : 'Correct the issues using Edit before approving';
+            $('approveBtn').title = hasIssues ? disabledMsg : '';
+            const msgEl = $('approveDisabledMsg');
+            if (msgEl) {
+                if (hasIssues && hasMissingDept) {
+                    msgEl.textContent = 'Please use Edit to fill in the department and other required fields before approving.';
+                    msgEl.classList.remove('hidden');
+                } else {
+                    msgEl.textContent = '';
+                    msgEl.classList.add('hidden');
+                }
+            }
             document.querySelectorAll('[data-for]').forEach(el => el.style.display = el.dataset.for === r.validation_status ? '' : 'none');
             hideReject();
         }
@@ -437,6 +513,17 @@ page_start($pdo, 'Validation', 'validation');
     function showView() { if (CAN_REVIEW) $('editPane').classList.add('hidden'); $('viewPane').classList.remove('hidden'); }
     function showEdit(data, keepErrors) {
         fillForm('rv_', data || current);
+        const rec = data || current;
+        const curPanel = $('rvEditResumeCurrent');
+        const curName = $('rvEditResumeName');
+        if (rec && rec.has_resume) {
+            if (curName) curName.textContent = rec.resume_name || 'resume.pdf';
+            if (curPanel) curPanel.classList.remove('hidden');
+        } else {
+            if (curPanel) curPanel.classList.add('hidden');
+        }
+        const fileInput = $('rv_resume');
+        if (fileInput) fileInput.value = '';
         if (!keepErrors) $('editPane').querySelectorAll('[data-server-errors]').forEach(el => el.classList.add('hidden'));
         $('viewPane').classList.add('hidden');
         $('editPane').classList.remove('hidden');

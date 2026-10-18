@@ -1,4 +1,4 @@
--- InternTrack OJT Management System - database (schema version 7)
+-- InternTrack OJT Management System - database (schema version 8)
 --
 -- FRESH INSTALL ONLY: import this file in phpMyAdmin into an empty database named `intern_track_db`.
 -- EXISTING INSTALL:   do NOT import it. Replace the PHP files only; db.php upgrades your current
@@ -50,7 +50,8 @@ CREATE TABLE `interns` (
   `resume_file` varchar(100) DEFAULT NULL COMMENT 'Random stored filename; never the original upload name',
   `resume_name` varchar(255) DEFAULT NULL COMMENT 'Sanitised original filename, shown to admins only',
   `resume_uploaded_at` datetime DEFAULT NULL,
-  `resume_text` mediumtext DEFAULT NULL COMMENT 'Extracted plain text from resume PDF for automated verification'
+  `resume_text` mediumtext DEFAULT NULL COMMENT 'Extracted plain text from resume PDF for automated verification',
+  `resume_text_status` varchar(10) DEFAULT NULL COMMENT 'NULL=not yet attempted, done, empty, failed'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
@@ -109,7 +110,7 @@ CREATE TABLE `settings` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 INSERT INTO `settings` (`setting_key`, `setting_value`) VALUES
-('schema_version', '7'),
+('schema_version', '8'),
 ('registration_open', '1');
 
 --

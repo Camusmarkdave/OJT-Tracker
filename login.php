@@ -87,7 +87,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
       <div class="z-10 flex-grow">
         <div class="mb-6 h-1 w-12 bg-figmaYellow"></div>
         <h1 class="mb-4 text-5xl font-extrabold uppercase leading-none tracking-tight">
-          Manage<br>Interns.<br><span class="text-figmaYellow">Efficiently.</span>
+          KHATE<br>Knowledge Hub for Administration and Tracking of <br><span class="text-figmaYellow">Employees-in-training.</span>
         </h1>
         <p class="mb-12 max-w-sm text-sm text-blue-100 leading-relaxed">
           A centralized OJT management system for maintaining intern records, schools, departments, and internship schedules.

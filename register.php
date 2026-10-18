@@ -9,6 +9,68 @@ $submitted = isset($_GET['submitted']);
 $errors    = [];
 $old       = [];
 $resumeHint = ''; // non-empty when the user must reselect the file after a validation error
+$regMode   = ($_POST['reg_mode'] ?? 'resume') === 'manual' ? 'manual' : 'resume';
+
+// ---------------------------------------------------------------------------
+// AJAX endpoint: automatically parses and extracts details from a selected resume
+// ---------------------------------------------------------------------------
+if ($open && ($_GET['action'] ?? '') === 'parse_resume' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json; charset=UTF-8');
+    csrf_verify();
+
+    if (!isset($_FILES['resume']) || $_FILES['resume']['error'] !== UPLOAD_ERR_OK) {
+        $msg = 'Please select a valid PDF file.';
+        if (isset($_FILES['resume']['error']) && ($_FILES['resume']['error'] === UPLOAD_ERR_INI_SIZE || $_FILES['resume']['error'] === UPLOAD_ERR_FORM_SIZE)) {
+            $msg = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+        }
+        echo json_encode(['success' => false, 'message' => $msg]);
+        exit;
+    }
+    $f = $_FILES['resume'];
+    if ($f['size'] > RESUME_MAX_BYTES) {
+        echo json_encode(['success' => false, 'message' => 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.']);
+        exit;
+    }
+    $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
+    if ($ext !== 'pdf') {
+        echo json_encode(['success' => false, 'message' => 'Only PDF files are accepted for the resume.']);
+        exit;
+    }
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    if ($finfo->file($f['tmp_name']) !== 'application/pdf') {
+        echo json_encode(['success' => false, 'message' => 'The uploaded file does not appear to be a valid PDF document.']);
+        exit;
+    }
+    $handle = fopen($f['tmp_name'], 'rb');
+    $magic  = fread($handle, 4);
+    fclose($handle);
+    if ($magic !== '%PDF') {
+        echo json_encode(['success' => false, 'message' => 'The uploaded file does not appear to be a valid PDF document.']);
+        exit;
+    }
+
+    $text = extract_pdf_text($f['tmp_name']);
+    if ($text === null || trim($text) === '') {
+        echo json_encode([
+            'success'  => false,
+            'readable' => false,
+            'message'  => 'No readable text was detected in the PDF (it may be a scanned document). Please fill in your details below.'
+        ]);
+        exit;
+    }
+
+    $parsed = parse_resume_data($text, $pdo);
+    $foundCount = count(array_filter($parsed));
+    echo json_encode([
+        'success'  => true,
+        'readable' => true,
+        'data'     => $parsed,
+        'message'  => $foundCount > 0
+            ? 'Information extracted from your resume and pre-filled below. Please review and verify the details.'
+            : 'Resume uploaded. Specific details could not be detected automatically; please fill in the fields below.'
+    ]);
+    exit;
+}
 
 if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
@@ -25,61 +87,83 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $old = clean_intern_input($_POST);
-        $old['status'] = 'Active'; // an admin may change the status during validation
-
-        $errors = validate_intern($old);
-        if (!$errors && find_duplicate($pdo, $old)) {
-            $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
-        }
+        // Default values for HR-only fields on public registration
+        $old['department'] = '';
+        $old['batch_year'] = (int)date('Y');
+        $old['status']     = 'Active';
+        $old['start_date'] = null;
+        $old['end_date']   = null;
 
         // --- Resume upload validation ---
         $resumeData = null; // will be populated on a clean upload
         $hasUpload  = isset($_FILES['resume']) && $_FILES['resume']['error'] !== UPLOAD_ERR_NO_FILE;
 
-        if ($hasUpload) {
-            $f = $_FILES['resume'];
+        if ($regMode === 'resume') {
+            if (!$hasUpload) {
+                $errors[] = 'Please select a PDF resume file to upload.';
+            } else {
+                $f = $_FILES['resume'];
 
-            if ($f['error'] !== UPLOAD_ERR_OK) {
-                if ($f['error'] === UPLOAD_ERR_INI_SIZE || $f['error'] === UPLOAD_ERR_FORM_SIZE) {
+                if ($f['error'] !== UPLOAD_ERR_OK) {
+                    if ($f['error'] === UPLOAD_ERR_INI_SIZE || $f['error'] === UPLOAD_ERR_FORM_SIZE) {
+                        $errors[] = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+                    } else {
+                        $errors[] = 'The resume file could not be uploaded. Please try again.';
+                    }
+                } elseif ($f['size'] > RESUME_MAX_BYTES) {
                     $errors[] = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
                 } else {
-                    $errors[] = 'The resume file could not be uploaded. Please try again.';
-                }
-            } elseif ($f['size'] > RESUME_MAX_BYTES) {
-                $errors[] = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
-            } else {
-                // Extension check
-                $origName = $f['name'];
-                $ext      = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
-                if ($ext !== 'pdf') {
-                    $errors[] = 'Only PDF files are accepted for the resume. Please select a file with a .pdf extension.';
-                } else {
-                    // Real MIME type via finfo
-                    $finfo    = new finfo(FILEINFO_MIME_TYPE);
-                    $mimeType = $finfo->file($f['tmp_name']);
-                    if ($mimeType !== 'application/pdf') {
-                        $errors[] = 'The uploaded file does not appear to be a valid PDF. Please upload a genuine PDF document.';
+                    // Extension check
+                    $origName = $f['name'];
+                    $ext      = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                    if ($ext !== 'pdf') {
+                        $errors[] = 'Only PDF files are accepted for the resume. Please select a file with a .pdf extension.';
                     } else {
-                        // Magic-byte check: a PDF must start with "%PDF"
-                        $handle = fopen($f['tmp_name'], 'rb');
-                        $magic  = fread($handle, 4);
-                        fclose($handle);
-                        if ($magic !== '%PDF') {
+                        // Real MIME type via finfo
+                        $finfo    = new finfo(FILEINFO_MIME_TYPE);
+                        $mimeType = $finfo->file($f['tmp_name']);
+                        if ($mimeType !== 'application/pdf') {
                             $errors[] = 'The uploaded file does not appear to be a valid PDF. Please upload a genuine PDF document.';
                         } else {
-                            // Sanitise the original name for display only (never used for paths)
-                            $safeName = mb_substr(preg_replace('/[^\w.\- ]/', '_', basename($origName)), 0, 255);
-                            $resumeData = ['tmpName' => $f['tmp_name'], 'name' => $safeName];
+                            // Magic-byte check: a PDF must start with "%PDF"
+                            $handle = fopen($f['tmp_name'], 'rb');
+                            $magic  = fread($handle, 4);
+                            fclose($handle);
+                            if ($magic !== '%PDF') {
+                                $errors[] = 'The uploaded file does not appear to be a valid PDF. Please upload a genuine PDF document.';
+                            } else {
+                                // Sanitise the original name for display only (never used for paths)
+                                $safeName = mb_substr(preg_replace('/[^\w.\- ]/', '_', basename($origName)), 0, 255);
+                                $resumeData = ['tmpName' => $f['tmp_name'], 'name' => $safeName];
+                            }
                         }
                     }
                 }
-            }
 
-            // The file input cannot be re-filled by the browser after a round-trip;
-            // tell the intern to reselect it if there were other errors too.
-            if ($errors) {
-                $resumeHint = 'The resume file you selected was not retained. Please reselect your resume file before submitting again.';
+                // The file input cannot be re-filled by the browser after a round-trip;
+                // tell the intern to reselect it if there were other errors too.
+                if ($errors) {
+                    $resumeHint = 'The resume file you selected was not retained. Please reselect your resume file before submitting again.';
+                }
             }
+        }
+
+        // Auto-extract from resume text on submit if any student-facing field was left empty
+        if ($resumeData !== null && ($old['first_name'] === '' || $old['last_name'] === '' || $old['school'] === '')) {
+            $extractedText = extract_pdf_text($resumeData['tmpName']);
+            if ($extractedText !== null && trim($extractedText) !== '') {
+                $autoParsed = parse_resume_data($extractedText, $pdo);
+                if ($old['first_name'] === '' && !empty($autoParsed['first_name'])) { $old['first_name'] = $autoParsed['first_name']; }
+                if ($old['last_name'] === '' && !empty($autoParsed['last_name'])) { $old['last_name'] = $autoParsed['last_name']; }
+                if ($old['school'] === '' && !empty($autoParsed['school'])) { $old['school'] = $autoParsed['school']; }
+                if ($old['course'] === '' && !empty($autoParsed['course'])) { $old['course'] = $autoParsed['course']; }
+            }
+        }
+
+        $regErrors = validate_intern_registration($old);
+        $errors    = array_merge($errors, $regErrors);
+        if (!$errors && find_duplicate($pdo, $old)) {
+            $errors[] = 'A registration with the same name and batch year has already been submitted. To correct it, please contact the HR Department.';
         }
 
         if (!$errors) {
@@ -95,14 +179,18 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     $errors[] = 'The resume file could not be saved due to a server error. Please try submitting again, or contact the HR Department for assistance.';
                 } else {
                     $resumeText = extract_pdf_text($destPath);
-                    $resume = ['file' => $storedName, 'name' => $resumeData['name'], 'text' => $resumeText];
+                    $resume = [
+                        'file'   => $storedName,
+                        'name'   => $resumeData['name'],
+                        'text'   => $resumeText,
+                        'status' => ($resumeText !== null && trim($resumeText) !== '') ? 'done' : 'empty',
+                    ];
                 }
             }
 
             if (!$errors) {
                 insert_intern($pdo, $old, 'Pending', 'register', $resume);
-                $detail = 'Registration submitted for ' . intern_summary($old) . '.';
-                if ($resume) { $detail .= ' Resume attached: ' . $resume['name'] . '.'; }
+                $detail = 'Registration submitted for ' . intern_summary($old) . ($resume ? ' (Resume attached: ' . $resume['name'] . ')' : ' (Manual registration)') . '.';
                 audit_log($pdo, 'registration_submitted', $detail,
                     ['id' => null, 'username' => 'Public registration', 'role' => null]);
                 if ($resume) {
@@ -149,8 +237,8 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
         <p class="mb-10 max-w-xs text-sm leading-relaxed text-blue-100">Submit your information to be included in the official OJT intern records.</p>
 
         <ol class="space-y-5 text-sm">
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">1</span><span class="text-blue-100"><b class="text-white">Submit your information.</b><br>Provide your school, course, department, and internship dates. You may also attach your resume.</span></li>
-          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">2</span><span class="text-blue-100"><b class="text-white">HR Department review.</b><br>Your submission is verified and corrected where necessary.</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">1</span><span class="text-blue-100"><b class="text-white">Submit your information.</b><br>Upload your resume to automatically extract your details, or fill them in manually.</span></li>
+          <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">2</span><span class="text-blue-100"><b class="text-white">HR Department review.</b><br>Your submission is verified and assigned to a department.</span></li>
           <li class="flex gap-3"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-figmaYellow text-xs font-black text-figmaBlue">3</span><span class="text-blue-100"><b class="text-white">Record accepted.</b><br>Once approved, your information becomes part of the official records.</span></li>
         </ol>
       </div>
@@ -190,18 +278,41 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 <?php echo csrf_field(); ?>
                 <div class="hidden" aria-hidden="true"><input type="text" name="website" tabindex="-1" autocomplete="off"></div>
 
-                <?php intern_fields($pdo, 'reg_', $old, ['status' => false, 'errors' => $errors]); ?>
+                <!-- Registration mode selector -->
+                <div class="rounded-lg border border-gray-200 bg-gray-50/70 p-4">
+                    <label class="block text-xs font-bold uppercase tracking-wider text-gray-700 mb-2">Registration Mode</label>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label id="mode_resume_card" class="flex cursor-pointer items-center gap-3 rounded-md border-2 bg-white p-3 shadow-sm transition hover:border-figmaBlue <?php echo $regMode === 'resume' ? 'border-figmaBlue ring-1 ring-figmaBlue' : 'border-gray-200'; ?>">
+                            <input type="radio" name="reg_mode" value="resume" id="mode_resume" class="h-4 w-4 accent-figmaBlue" <?php echo $regMode === 'resume' ? 'checked' : ''; ?> onchange="toggleRegMode()">
+                            <div>
+                                <div class="text-sm font-bold text-gray-900">Upload my resume</div>
+                                <div class="text-[11px] text-gray-500">Auto-fill details from your PDF</div>
+                            </div>
+                        </label>
+                        <label id="mode_manual_card" class="flex cursor-pointer items-center gap-3 rounded-md border-2 bg-white p-3 shadow-sm transition hover:border-figmaBlue <?php echo $regMode === 'manual' ? 'border-figmaBlue ring-1 ring-figmaBlue' : 'border-gray-200'; ?>">
+                            <input type="radio" name="reg_mode" value="manual" id="mode_manual" class="h-4 w-4 accent-figmaBlue" <?php echo $regMode === 'manual' ? 'checked' : ''; ?> onchange="toggleRegMode()">
+                            <div>
+                                <div class="text-sm font-bold text-gray-900">Fill in manually</div>
+                                <div class="text-[11px] text-gray-500">Register directly without file</div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
 
-                <!-- Resume upload (optional) -->
-                <div>
-                    <label class="<?php echo LABEL_CLS; ?>" for="reg_resume">RESUME (OPTIONAL — PDF ONLY, MAX <?php echo RESUME_MAX_BYTES / 1024 / 1024; ?> MB)</label>
-                    <input type="file" name="resume" id="reg_resume" accept=".pdf,application/pdf"
+                <!-- Resume upload section (visible only in resume mode, placed before details so it auto-fills them) -->
+                <div id="resumeSection" class="<?php echo $regMode === 'manual' ? 'hidden' : ''; ?> rounded-lg border border-blue-100 bg-blue-50/40 p-4">
+                    <label class="<?php echo LABEL_CLS; ?>" for="reg_resume">SELECT YOUR RESUME * (PDF ONLY, MAX <?php echo RESUME_MAX_BYTES / 1024 / 1024; ?> MB)</label>
+                    <input type="file" name="resume" id="reg_resume" accept=".pdf,application/pdf" <?php echo $regMode === 'resume' ? 'required' : ''; ?>
                         class="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-figmaBlue file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-blue-900 focus:outline-none focus:ring-1 focus:ring-figmaBlue">
                     <?php if ($resumeHint): ?>
                     <p class="mt-1 text-xs text-yellow-700 font-medium"><?php echo e($resumeHint); ?></p>
                     <?php endif; ?>
-                    <p class="mt-1 text-[11px] text-gray-400">Attaching a resume is optional. If provided, it will be reviewed by HR and stored securely.</p>
+                    <div id="resumeParseStatus" class="hidden mt-2 text-xs font-medium"></div>
+                    <p class="mt-1 text-[11px] text-gray-500">When you select your PDF resume, your name, school, and course will be extracted automatically into the fields below.</p>
                 </div>
+
+                <!-- Student-facing fields (first name, last name, school required, course) -->
+                <?php intern_fields($pdo, 'reg_', $old, ['hr_only' => false, 'status' => false, 'errors' => $errors]); ?>
 
                 <label class="flex items-start gap-3 rounded border border-gray-200 bg-white p-3 text-xs text-gray-600">
                     <input type="checkbox" required class="mt-0.5 h-4 w-4 accent-[#15458A]">
@@ -219,5 +330,109 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
   </div>
   <script src="app.js"></script>
+  <script>
+    function toggleRegMode() {
+        const isResume = document.getElementById('mode_resume').checked;
+        const resumeSection = document.getElementById('resumeSection');
+        const resumeInput = document.getElementById('reg_resume');
+        const resumeCard = document.getElementById('mode_resume_card');
+        const manualCard = document.getElementById('mode_manual_card');
+
+        if (!resumeSection || !resumeInput) return;
+
+        if (isResume) {
+            resumeSection.classList.remove('hidden');
+            resumeInput.required = true;
+            resumeInput.disabled = false;
+            if (resumeCard) {
+                resumeCard.classList.add('border-figmaBlue', 'ring-1', 'ring-figmaBlue');
+                resumeCard.classList.remove('border-gray-200');
+            }
+            if (manualCard) {
+                manualCard.classList.remove('border-figmaBlue', 'ring-1', 'ring-figmaBlue');
+                manualCard.classList.add('border-gray-200');
+            }
+        } else {
+            resumeSection.classList.add('hidden');
+            resumeInput.required = false;
+            resumeInput.disabled = true;
+            resumeInput.value = '';
+            const parseStatus = document.getElementById('resumeParseStatus');
+            if (parseStatus) { parseStatus.classList.add('hidden'); parseStatus.textContent = ''; }
+            if (manualCard) {
+                manualCard.classList.add('border-figmaBlue', 'ring-1', 'ring-figmaBlue');
+                manualCard.classList.remove('border-gray-200');
+            }
+            if (resumeCard) {
+                resumeCard.classList.remove('border-figmaBlue', 'ring-1', 'ring-figmaBlue');
+                resumeCard.classList.add('border-gray-200');
+            }
+        }
+    }
+
+    // Auto-parse resume on file selection
+    document.addEventListener('DOMContentLoaded', () => {
+        toggleRegMode();
+
+        const resumeInput = document.getElementById('reg_resume');
+        const parseStatus = document.getElementById('resumeParseStatus');
+        if (!resumeInput) return;
+
+        resumeInput.addEventListener('change', async function() {
+            if (!this.files || !this.files[0]) return;
+            const file = this.files[0];
+            if (!file.name.toLowerCase().endsWith('.pdf')) return;
+
+            if (parseStatus) {
+                parseStatus.textContent = 'Extracting information from resume...';
+                parseStatus.className = 'mt-2 text-xs font-medium text-figmaBlue flex items-center gap-1.5';
+                parseStatus.classList.remove('hidden');
+            }
+
+            const formData = new FormData();
+            formData.append('resume', file);
+            const csrfEl = document.querySelector('input[name="csrf"]');
+            if (csrfEl) formData.append('csrf', csrfEl.value);
+
+            try {
+                const res = await fetch('register.php?action=parse_resume', {
+                    method: 'POST',
+                    body: formData
+                });
+                const json = await res.json();
+                if (json.success && json.data) {
+                    if (json.data.first_name) {
+                        const fn = document.getElementById('reg_first_name');
+                        if (fn) fn.value = json.data.first_name;
+                    }
+                    if (json.data.last_name) {
+                        const ln = document.getElementById('reg_last_name');
+                        if (ln) ln.value = json.data.last_name;
+                    }
+                    if (json.data.school) {
+                        const sc = document.getElementById('reg_school');
+                        if (sc) sc.value = json.data.school;
+                    }
+                    if (json.data.course) {
+                        const cs = document.getElementById('reg_course');
+                        if (cs) cs.value = json.data.course;
+                    }
+                    if (parseStatus) {
+                        parseStatus.textContent = json.message || 'Details extracted from resume. Please review below.';
+                        parseStatus.className = 'mt-2 text-xs font-medium text-green-700 bg-green-50 border border-green-200 rounded p-2';
+                    }
+                } else if (parseStatus) {
+                    parseStatus.textContent = json.message || 'Could not auto-extract details. Please enter your details below.';
+                    parseStatus.className = 'mt-2 text-xs font-medium text-yellow-800 bg-yellow-50 border border-yellow-200 rounded p-2';
+                }
+            } catch (err) {
+                if (parseStatus) {
+                    parseStatus.textContent = 'Could not extract details automatically. Please enter your details below.';
+                    parseStatus.className = 'mt-2 text-xs font-medium text-gray-500';
+                }
+            }
+        });
+    });
+  </script>
 </body>
 </html>

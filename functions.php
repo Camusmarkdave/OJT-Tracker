@@ -13,9 +13,23 @@ const STATUS_CLS = [
     'Completed' => 'bg-blue-100 text-figmaBlue',
 ];
 
-// Resume upload storage: absolute path to a folder OUTSIDE the web root.
-// If you must place this inside the web root, the ensure_schema() call creates a .htaccess that denies all requests.
-const RESUME_UPLOAD_DIR = __DIR__ . '/../intern_uploads/resumes';
+// ---------------------------------------------------------------------------
+// Resume upload storage.
+// Default: two levels above the XAMPP htdocs folder so that, on a standard
+// XAMPP layout (C:\xampp\htdocs\OJT-Tracker), the files land in
+// C:\xampp\intern_uploads\resumes — outside the web root.
+//
+// To override, define RESUME_UPLOAD_DIR_OVERRIDE *before* loading this file,
+// or set the environment variable INTERN_UPLOAD_DIR:
+//   putenv('INTERN_UPLOAD_DIR=D:\\safe\\uploads');
+// ---------------------------------------------------------------------------
+if (!defined('RESUME_UPLOAD_DIR')) {
+    define('RESUME_UPLOAD_DIR',
+        defined('RESUME_UPLOAD_DIR_OVERRIDE')
+            ? RESUME_UPLOAD_DIR_OVERRIDE
+            : (getenv('INTERN_UPLOAD_DIR') ?: rtrim(__DIR__, '/\\') . '/../../intern_uploads/resumes')
+    );
+}
 const RESUME_MAX_BYTES  = 5 * 1024 * 1024; // 5 MB
 
 /* ------------------------------------------------------------------ */
@@ -277,7 +291,7 @@ function ensure_schema(PDO $pdo): void {
     } catch (PDOException $ex) {
         $v = false; // settings table doesn't exist yet
     }
-    if ($v === '7') { return; }
+    if ($v === '8') { return; }
 
     $has = fn($t, $c) => (bool)$pdo->query("SHOW COLUMNS FROM `$t` LIKE '$c'")->fetch();
 
@@ -350,21 +364,72 @@ function ensure_schema(PDO $pdo): void {
         $pdo->exec("ALTER TABLE interns ADD resume_text MEDIUMTEXT NULL");
     }
 
-    // Ensure the resume upload directory exists and is protected if it ended up inside the web root.
-    $dir = RESUME_UPLOAD_DIR;
+    // Schema v8: extraction status column so scanned PDFs are not re-parsed on every page load.
+    // Values: NULL = not yet attempted, 'done' = text extracted, 'empty' = PDF had no readable text, 'failed' = parser error.
+    if (!$has('interns', 'resume_text_status')) {
+        $pdo->exec("ALTER TABLE interns ADD resume_text_status VARCHAR(10) NULL COMMENT 'NULL=pending, done, empty, failed'");
+        // Back-fill: rows that already have resume_text set are treated as done/empty;
+        // rows with a resume but NULL text stay NULL so the first page-load triggers extraction.
+        $pdo->exec("UPDATE interns SET resume_text_status = 'done'  WHERE resume_text IS NOT NULL AND resume_text <> ''");
+        $pdo->exec("UPDATE interns SET resume_text_status = 'empty' WHERE resume_file IS NOT NULL AND resume_text IS NULL");
+        // Leave rows without a resume as NULL (no extraction needed).
+    }
+
+    // -----------------------------------------------------------------------
+    // Ensure the resume upload directory exists.
+    // Migrate any files from the old path (__DIR__/../intern_uploads/resumes)
+    // to the current RESUME_UPLOAD_DIR in case the constant was changed.
+    // -----------------------------------------------------------------------
+    $dir    = RESUME_UPLOAD_DIR;
+    $oldDir = rtrim(__DIR__, '/\\') . '/../intern_uploads/resumes';
+    $oldDir = str_replace('\\', '/', $oldDir); // normalise for is_dir()
+
     if (!is_dir($dir)) {
         @mkdir($dir, 0750, true);
     }
-    // If the directory is under the document root, add a .htaccess guard.
-    $docRoot = rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/\\');
-    if ($docRoot !== '' && str_starts_with(realpath($dir) ?: $dir, $docRoot)) {
-        $htaccess = $dir . '/.htaccess';
-        if (!file_exists($htaccess)) {
-            file_put_contents($htaccess, "deny from all\n");
+
+    // Move files from the old location to the new one (best-effort; skips conflicts).
+    if ($dir !== realpath($oldDir) && is_dir($oldDir)) {
+        foreach ((array)glob($oldDir . '/*.pdf') as $src) {
+            $dest = $dir . '/' . basename($src);
+            if (!file_exists($dest)) {
+                @rename($src, $dest);
+            }
         }
     }
 
-    save_setting($pdo, 'schema_version', '7');
+    // If the directory is under the document root, add a .htaccess guard and
+    // emit a warning so it is visible in the PHP error log.
+    // We compare real (canonicalised) paths so drive-letter case on Windows
+    // does not cause a false mismatch.  CLI scripts have no DOCUMENT_ROOT;
+    // skip the check there to avoid a spurious warning.
+    if (isset($_SERVER['DOCUMENT_ROOT']) && $_SERVER['DOCUMENT_ROOT'] !== '') {
+        $realDir     = realpath($dir) ?: $dir;
+        $realDocRoot = realpath($_SERVER['DOCUMENT_ROOT']) ?: rtrim($_SERVER['DOCUMENT_ROOT'], '/\\');
+
+        // Normalise path separators and case for a Windows-safe prefix test.
+        $normDir     = mb_strtolower(str_replace('\\', '/', $realDir));
+        $normDocRoot = mb_strtolower(str_replace('\\', '/', $realDocRoot));
+
+        if ($normDocRoot !== '' && str_starts_with($normDir . '/', $normDocRoot . '/')) {
+            // Upload directory is inside the web root — add a .htaccess guard.
+            $htaccess = $dir . '/.htaccess';
+            if (!file_exists($htaccess)) {
+                file_put_contents($htaccess, "deny from all\n");
+            }
+            error_log(
+                'InternTrack WARNING: RESUME_UPLOAD_DIR (' . $dir . ') is inside the web root (' .
+                $_SERVER['DOCUMENT_ROOT'] . '). Move it outside the web root for better security.'
+            );
+            audit_log($pdo, 'access_denied',
+                'Security warning: RESUME_UPLOAD_DIR is inside the web root (' . $dir . '). '
+                . 'Move it outside the web root. A .htaccess deny-all guard has been added.',
+                ['id' => null, 'username' => 'System', 'role' => null]
+            );
+        }
+    }
+
+    save_setting($pdo, 'schema_version', '8');
 }
 
 function setting(string $key, ?string $default = null): ?string {
@@ -482,6 +547,23 @@ function validate_intern(array $d): array {
 }
 
 /**
+ * Validates a self-registration submission from the public form.
+ * Only validates student-facing fields: first name, last name, and school (all required).
+ */
+function validate_intern_registration(array $d): array {
+    $err = [];
+    foreach (['first_name' => 'First name', 'last_name' => 'Last name', 'school' => 'School'] as $k => $label) {
+        if (trim((string)($d[$k] ?? '')) === '') { $err[] = "$label is required."; }
+    }
+    foreach (['first_name' => 50, 'last_name' => 50, 'course' => 100, 'school' => 100] as $k => $max) {
+        if (mb_strlen((string)($d[$k] ?? '')) > $max) {
+            $err[] = ucfirst(str_replace('_', ' ', $k)) . " must not exceed $max characters.";
+        }
+    }
+    return $err;
+}
+
+/**
  * Insert a new intern record.  The optional $resume array may contain:
  *   'file'        => stored filename (random, e.g. 'abc123.pdf')
  *   'name'        => sanitised original filename shown to admins
@@ -494,12 +576,12 @@ function insert_intern(PDO $pdo, array $d, string $validation = 'Approved', stri
     if ($resume) {
         $pdo->prepare("INSERT INTO interns
             (first_name, last_name, course, school, department, start_date, end_date, batch_year, status,
-             validation_status, submitted_via, validated_at, resume_file, resume_name, resume_uploaded_at, resume_text)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,$validatedAt,?,?,NOW(),?)")
+             validation_status, submitted_via, validated_at, resume_file, resume_name, resume_uploaded_at, resume_text, resume_text_status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,$validatedAt,?,?,NOW(),?,?)")
             ->execute([
                 $d['first_name'], $d['last_name'], $d['course'] ?: null, $d['school'] ?: null, $d['department'],
                 $d['start_date'], $d['end_date'], (int)$d['batch_year'], $d['status'], $validation, $via,
-                $resume['file'], $resume['name'], $resume['text'] ?? null,
+                $resume['file'], $resume['name'], $resume['text'] ?? null, $resume['status'] ?? null,
             ]);
     } else {
         $pdo->prepare("INSERT INTO interns
@@ -562,6 +644,189 @@ function extract_pdf_text(string $filePath): ?string {
 }
 
 /**
+ * Heuristically extracts first name, last name, school, and course from resume plain text.
+ * Used for auto-filling the registration form when a student uploads a resume.
+ */
+function parse_resume_data(string $text, PDO $pdo): array {
+    $lines = array_values(array_filter(array_map('trim', preg_split('/\r\n|\n|\r/', $text)), fn($l) => $l !== ''));
+
+    // Header words to ignore when searching for applicant name
+    $skipHeaders = [
+        'curriculum vitae', 'resume', 'cv', 'biodata', 'bio-data', 'personal data',
+        'profile', 'contact', 'education', 'experience', 'summary', 'about me'
+    ];
+
+    $firstName = '';
+    $lastName  = '';
+
+    foreach ($lines as $line) {
+        $clean = trim(preg_replace('/[^\p{L}\p{N}\s.\'-]/u', '', $line));
+        $lower = mb_strtolower($clean);
+        if (in_array($lower, $skipHeaders, true)) continue;
+        if (strpos($line, '@') !== false) continue;
+        if (preg_match('/https?:|\.com|\.org|\.net|\.edu|\.ph/i', $line)) continue;
+        if (preg_match('/^[\d\s+\-().]{7,}$/', $line)) continue;
+        if (preg_match('/^(objective|skills|projects|certifications|awards|work|employment|academic|reference)/i', $line)) continue;
+        if (mb_strlen($clean) < 3 || mb_strlen($clean) > 60) continue;
+
+        $words = preg_split('/\s+/', $clean);
+        if (count($words) >= 2 && count($words) <= 5) {
+            $valid = true;
+            foreach ($words as $w) {
+                if (!preg_match('/^[\p{L}.-]+$/u', $w)) { $valid = false; break; }
+            }
+            if ($valid) {
+                // If line is ALL CAPS, convert to Title Case for cleaner form entry
+                if (mb_strtoupper($clean) === $clean) {
+                    $words = array_map(fn($w) => mb_convert_case($w, MB_CASE_TITLE, 'UTF-8'), $words);
+                }
+                if (count($words) === 2) {
+                    $firstName = $words[0];
+                    $lastName  = $words[1];
+                } elseif (count($words) === 3) {
+                    $firstName = $words[0] . ' ' . $words[1];
+                    $lastName  = $words[2];
+                } else {
+                    $lastName = array_pop($words);
+                    $firstName = implode(' ', $words);
+                }
+                break;
+            }
+        }
+    }
+
+    // School: first check known schools from database
+    $school = '';
+    try {
+        $knownSchools = get_schools($pdo);
+        foreach ($knownSchools as $ks) {
+            if ($ks !== '' && mb_stripos($text, $ks) !== false) {
+                $school = $ks;
+                break;
+            }
+        }
+    } catch (\Throwable $e) {
+        // fallback to regex if DB not available
+    }
+
+    if ($school === '') {
+        foreach ($lines as $line) {
+            if (preg_match('/\b(University|College|Institute|Academy|Polytechnic)\b/i', $line)) {
+                if (preg_match('/\b(Bachelor|Master|Doctor|Associate|Diploma|High\s+School|Secondary|Elementary|Dean|Honor|Award|GWA|GPA|Cum\s+Laude)\b/i', $line)) {
+                    continue;
+                }
+                $cand = trim($line);
+                $cand = preg_replace('/[\s,\.\-]+(?:\(?\d{4}(?:\s*[-–—]\s*\d{4}|\s*[-–—]\s*Present)?\)?).*$/i', '', $cand);
+                $cand = trim($cand);
+                if (mb_strlen($cand) >= 4 && mb_strlen($cand) <= 100) {
+                    if (mb_strtoupper($cand) === $cand) {
+                        $cand = mb_convert_case($cand, MB_CASE_TITLE, 'UTF-8');
+                    }
+                    $school = $cand;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Course
+    $course = '';
+    $coursePatterns = [
+        '/\b(?:Bachelor\s+(?:of|in)\s+[^,\n\r;]{3,50})/iu',
+        '/\b(?:BS\s+[^,\n\r;]{3,50})/iu',
+        '/\b(?:BA\s+[^,\n\r;]{3,50})/iu',
+        '/\b(?:Associate\s+in\s+[^,\n\r;]{3,50})/iu',
+    ];
+    foreach ($lines as $line) {
+        foreach ($coursePatterns as $pat) {
+            if (preg_match($pat, $line, $m)) {
+                $cand = trim($m[0]);
+                if (mb_strlen($cand) <= 100) {
+                    $course = $cand;
+                    break 2;
+                }
+            }
+        }
+    }
+    if ($course === '') {
+        if (preg_match('/\b(Information\s+Technology|Computer\s+Science|Information\s+Systems|Computer\s+Engineering|Business\s+Administration|Accountancy|Multimedia\s+Arts)\b/i', $text, $m)) {
+            $course = 'BS ' . trim($m[0]);
+        }
+    }
+
+    return [
+        'first_name' => $firstName,
+        'last_name'  => $lastName,
+        'school'     => $school,
+        'course'     => $course,
+    ];
+}
+
+/**
+ * Saves or replaces the resume file for an intern record.
+ * Handles validation, deleting any old file, moving the file, extracting text,
+ * updating the DB row, and logging to audit_logs.
+ * Returns null on success, or an error message string on failure.
+ */
+function save_intern_resume(PDO $pdo, int $id, array $file): ?string {
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        if ($file['error'] === UPLOAD_ERR_INI_SIZE || $file['error'] === UPLOAD_ERR_FORM_SIZE) {
+            return 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+        }
+        return 'The resume file could not be uploaded. Please try again.';
+    }
+    if ($file['size'] > RESUME_MAX_BYTES) {
+        return 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+    }
+    $origName = $file['name'];
+    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+    if ($ext !== 'pdf') {
+        return 'Only PDF files are accepted for the resume. Please select a file with a .pdf extension.';
+    }
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    if ($finfo->file($file['tmp_name']) !== 'application/pdf') {
+        return 'The uploaded file does not appear to be a valid PDF document.';
+    }
+    $handle = fopen($file['tmp_name'], 'rb');
+    $magic = fread($handle, 4);
+    fclose($handle);
+    if ($magic !== '%PDF') {
+        return 'The uploaded file does not appear to be a valid PDF document.';
+    }
+
+    $st = $pdo->prepare("SELECT * FROM interns WHERE id = ?");
+    $st->execute([$id]);
+    $rec = $st->fetch();
+    if (!$rec) {
+        return 'Intern record not found.';
+    }
+
+    $dir = RESUME_UPLOAD_DIR;
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0750, true);
+    }
+    $storedName = bin2hex(random_bytes(16)) . '.pdf';
+    $destPath = $dir . '/' . $storedName;
+
+    if (!move_uploaded_file($file['tmp_name'], $destPath)) {
+        return 'The resume file could not be saved due to a server error. Please try again.';
+    }
+
+    // Delete previous resume file if one existed
+    delete_intern_resume($rec);
+
+    $safeName = mb_substr(preg_replace('/[^\w.\- ]/', '_', basename($origName)), 0, 255);
+    $resumeText = extract_pdf_text($destPath);
+    $textStatus = ($resumeText !== null && trim($resumeText) !== '') ? 'done' : 'empty';
+
+    $pdo->prepare("UPDATE interns SET resume_file = ?, resume_name = ?, resume_uploaded_at = NOW(), resume_text = ?, resume_text_status = ? WHERE id = ?")
+        ->execute([$storedName, $safeName, $resumeText, $textStatus, $id]);
+
+    audit_log($pdo, 'resume_uploaded', 'Uploaded resume (' . $safeName . ') for intern record #' . $id . ' (' . intern_summary($rec) . ').');
+    return null;
+}
+
+/**
  * Normalizes text for comparison:
  * - strips accents / diacritics (e.g. "José" -> "jose", "Peña" -> "pena")
  * - converts to lowercase
@@ -612,6 +877,36 @@ function verify_resume_matches(?string $resumeText, array $intern): array {
         'course'     => 'The course entered was not found in the resume.',
     ];
 
+    /**
+     * Tests whether $needle appears as a whole word (or whole phrase) inside
+     * $haystack.  Both strings must already be normalised (lowercase, stripped
+     * of diacritics).
+     *
+     * For multi-word values (e.g. school names) we require every individual
+     * word to appear in the resume rather than demanding that the exact phrase
+     * appears verbatim — this prevents false negatives caused by line-breaks or
+     * extra punctuation in the extracted text while still catching "Ann" vs.
+     * "Annual".  Single-word values are matched with \b word-boundary anchors
+     * so that "ann" does not match inside "annual".
+     */
+    $wordMatch = function (string $needle, string $haystack): bool {
+        if ($needle === '') { return false; }
+        // Split multi-word needles and require each word to appear as a whole word.
+        $words = preg_split('/\s+/u', $needle, -1, PREG_SPLIT_NO_EMPTY);
+        if ($words === false) { return false; }
+        foreach ($words as $word) {
+            if ($word === '') { continue; }
+            // Escape the word for use in a regex and wrap in Unicode word-boundary assertions.
+            // \b is ASCII-only in many engines; use a lookaround pair that also handles
+            // letters with diacritics that survived normalisation.
+            $escaped = preg_quote($word, '/');
+            if (!preg_match('/(?<![\p{L}\p{N}])' . $escaped . '(?![\p{L}\p{N}])/ui', $haystack)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     $checkedCount = 0;
     foreach ($fields as $field => $warningMsg) {
         $val = trim((string)($intern[$field] ?? ''));
@@ -620,7 +915,7 @@ function verify_resume_matches(?string $resumeText, array $intern): array {
         }
         $checkedCount++;
         $normVal = normalize_check_text($val);
-        if ($normVal === '' || !str_contains($normResume, $normVal)) {
+        if ($normVal === '' || !$wordMatch($normVal, $normResume)) {
             $warnings[] = $warningMsg;
         }
     }
@@ -632,6 +927,29 @@ function verify_resume_matches(?string $resumeText, array $intern): array {
         'note'        => null,
         'all_matched' => ($checkedCount > 0 && count($warnings) === 0),
     ];
+}
+
+/**
+ * Logs a resume_viewed audit entry at most once per signed-in user per intern
+ * record per 10-minute window.  The throttle state is stored in the PHP session
+ * so it survives across page loads without a database round-trip.
+ *
+ * Call this instead of audit_log() directly when streaming a resume.
+ */
+function audit_log_resume_viewed(PDO $pdo, int $internId, string $displayName): void {
+    if (session_status() !== PHP_SESSION_ACTIVE) { session_start(); }
+
+    $now       = time();
+    $windowSec = 10 * 60; // 10 minutes
+    $key       = 'rv_' . (int)$internId;
+
+    $last = $_SESSION['resume_view_log'][$key] ?? 0;
+    if (($now - $last) < $windowSec) {
+        return; // already logged within the current window; skip
+    }
+
+    $_SESSION['resume_view_log'][$key] = $now;
+    audit_log($pdo, 'resume_viewed', 'Viewed resume for intern record #' . $internId . ' (' . $displayName . ').');
 }
 
 /** Finds another (non-rejected) record with the same name and batch year. */
@@ -650,9 +968,10 @@ function form_attrs(): string { return 'data-intern-form'; }
 
 /**
  * Prints the intern fields. $p is an id prefix (e.g. 'add_', 'edit_', 'reg_', 'rv_'),
- * $v pre-filled values, $o options: ['status' => bool, 'errors' => string[]].
+ * $v pre-filled values, $o options: ['status' => bool, 'hr_only' => bool, 'errors' => string[]].
  */
 function intern_fields(PDO $pdo, string $p, array $v = [], array $o = []): void {
+    $showHr     = $o['hr_only'] ?? true;
     $withStatus = $o['status'] ?? true;
     $depts   = get_departments($pdo);
     $schools = get_schools($pdo);
@@ -675,8 +994,8 @@ function intern_fields(PDO $pdo, string $p, array $v = [], array $o = []): void 
 
     <div class="grid grid-cols-2 gap-4">
         <div>
-            <label class="<?= $L ?>" for="<?= $p ?>school">SCHOOL</label>
-            <input type="text" name="school" id="<?= $p ?>school" value="<?= $val('school') ?>" maxlength="100" list="<?= $p ?>schools" placeholder="e.g. Holy Angel University" autocomplete="off" class="<?= $I ?>">
+            <label class="<?= $L ?>" for="<?= $p ?>school">SCHOOL <?= $showHr ? '' : '*' ?></label>
+            <input type="text" name="school" id="<?= $p ?>school" value="<?= $val('school') ?>" maxlength="100" list="<?= $p ?>schools" placeholder="e.g. Holy Angel University" autocomplete="off" <?= $showHr ? '' : 'required' ?> class="<?= $I ?>">
             <datalist id="<?= $p ?>schools"><?php foreach ($schools as $s): ?><option value="<?= e($s) ?>"><?php endforeach; ?></datalist>
         </div>
         <div>
@@ -685,6 +1004,7 @@ function intern_fields(PDO $pdo, string $p, array $v = [], array $o = []): void 
         </div>
     </div>
 
+    <?php if ($showHr): ?>
     <div class="grid <?= $withStatus ? 'grid-cols-3' : 'grid-cols-2' ?> gap-4">
         <div>
             <label class="<?= $L ?>" for="<?= $p ?>department">DEPARTMENT *</label>
@@ -719,6 +1039,9 @@ function intern_fields(PDO $pdo, string $p, array $v = [], array $o = []): void 
     </div>
     <p class="text-[11px] text-gray-400">Fields marked with an asterisk (*) are required. The end date must not be earlier than the start date.</p>
     <div data-date-error class="hidden rounded border-l-4 border-red-500 bg-red-50 p-3 text-xs font-medium text-red-700"></div>
+    <?php else: ?>
+    <p class="text-[11px] text-gray-400">Fields marked with an asterisk (*) are required.</p>
+    <?php endif; ?>
     <?php
 }
 

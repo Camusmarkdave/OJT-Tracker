@@ -44,6 +44,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $old = clean_intern_input($_POST);
         $old['id'] = $id;
         $editErrors = validate_intern($old);
+
+        // Check if HR uploaded a resume file
+        $hasResumeUpload = isset($_FILES['resume']) && $_FILES['resume']['error'] !== UPLOAD_ERR_NO_FILE;
+        if ($hasResumeUpload && !$editErrors) {
+            $resumeErr = save_intern_resume($pdo, $id, $_FILES['resume']);
+            if ($resumeErr) {
+                $editErrors[] = $resumeErr;
+            }
+        }
+
         if (!$editErrors) {
             update_intern($pdo, $id, $old);
             audit_log($pdo, 'intern_edited', 'Edited intern record for ' . trim($before['first_name'] . ' ' . $before['last_name']) . '. Changes: ' . intern_diff($before, $old) . '.');
@@ -220,6 +230,7 @@ page_start($pdo, 'Intern Records', 'dashboard');
                             <th class="p-5">Start Date</th>
                             <th class="p-5">End Date</th>
                             <th class="p-5">Status</th>
+                            <th class="p-5">Resume</th>
                             <th class="p-5 text-right">Actions</th>
                         </tr>
                     </thead>
@@ -241,6 +252,18 @@ page_start($pdo, 'Intern Records', 'dashboard');
                                     <td class="p-5 text-sm text-gray-600"><?php echo fmt_date($intern['start_date']); ?></td>
                                     <td class="p-5 text-sm text-gray-600"><?php echo fmt_date($intern['end_date']); ?></td>
                                     <td class="p-5"><?php echo status_badge((string)$intern['status']); ?></td>
+                                    <td class="p-5">
+                                        <?php if (!empty($intern['resume_file'])): ?>
+                                        <a href="resume.php?id=<?php echo (int)$intern['id']; ?>" target="_blank" rel="noopener"
+                                            title="View resume for <?php echo e($fullName); ?>"
+                                            class="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-figmaBlue shadow-sm transition hover:border-figmaBlue hover:bg-figmaBlue hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-figmaBlue focus-visible:ring-offset-1">
+                                            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                            Resume
+                                        </a>
+                                        <?php else: ?>
+                                        <span class="text-xs text-gray-300">&mdash;</span>
+                                        <?php endif; ?>
+                                    </td>
                                     <td class="p-5">
                                         <div class="flex items-center justify-end gap-2">
                                             <?php if ($canEdit): ?>
@@ -264,7 +287,7 @@ page_start($pdo, 'Intern Records', 'dashboard');
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
-                                <td colspan="7" class="p-10 text-center text-sm text-gray-400">
+                                <td colspan="8" class="p-10 text-center text-sm text-gray-400">
                                     <?php echo $filtered ? 'No intern records match the selected filters.' : 'No intern records are available. Select "Add Intern" to create the first record.'; ?>
                                 </td>
                             </tr>
@@ -319,12 +342,25 @@ page_start($pdo, 'Intern Records', 'dashboard');
             <button onclick="closeEditModal()" aria-label="Close" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
         </div>
 
-        <form method="POST" action="dashboard.php" <?php echo form_attrs(); ?> class="space-y-4">
+        <form method="POST" action="dashboard.php" enctype="multipart/form-data" <?php echo form_attrs(); ?> class="space-y-4">
             <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="edit_intern">
             <input type="hidden" name="id" id="edit_id">
 
             <?php intern_fields($pdo, 'edit_', [], ['errors' => $editErrors]); ?>
+
+            <!-- Resume upload / replacement -->
+            <div class="rounded-md border border-gray-200 bg-gray-50/70 p-4">
+                <label class="<?php echo LABEL_CLS; ?>" for="edit_resume">ATTACH / REPLACE RESUME (PDF ONLY, MAX <?php echo RESUME_MAX_BYTES / 1024 / 1024; ?> MB)</label>
+                <div id="editResumeCurrent" class="hidden mb-2 text-xs text-gray-600 flex items-center gap-2">
+                    <span class="font-bold text-gray-500">Current Resume:</span>
+                    <span id="editResumeName" class="font-medium text-figmaBlue"></span>
+                    <span class="text-gray-400">(uploading a new file will replace this)</span>
+                </div>
+                <input type="file" name="resume" id="edit_resume" accept=".pdf,application/pdf"
+                    class="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-figmaBlue file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-blue-900 focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                <p class="mt-1 text-[11px] text-gray-400">Attach a resume to this intern's record if one was submitted late or needs updating.</p>
+            </div>
 
             <div class="flex justify-end gap-3 border-t pt-4 mt-4">
                 <button type="button" onclick="closeEditModal()" class="px-4 py-2 border rounded text-xs font-bold text-gray-600 hover:bg-gray-100">CANCEL</button>
@@ -357,6 +393,16 @@ page_start($pdo, 'Intern Records', 'dashboard');
         const modal = document.getElementById('editInternModal');
         document.getElementById('edit_id').value = intern.id;
         fillForm('edit_', intern);
+        const curPanel = document.getElementById('editResumeCurrent');
+        const curName = document.getElementById('editResumeName');
+        if (intern.resume_file) {
+            if (curName) curName.textContent = intern.resume_name || 'resume.pdf';
+            if (curPanel) curPanel.classList.remove('hidden');
+        } else {
+            if (curPanel) curPanel.classList.add('hidden');
+        }
+        const fileInput = document.getElementById('edit_resume');
+        if (fileInput) fileInput.value = '';
         if (!keepErrors) modal.querySelectorAll('[data-server-errors]').forEach(el => el.classList.add('hidden'));
         modal.classList.remove('hidden');
     }
