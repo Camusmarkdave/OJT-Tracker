@@ -15,6 +15,9 @@ try {
 // Shared helpers (validation, settings, layout, etc.)
 require_once __DIR__ . '/functions.php';
 
+// Use the same clock as PHP (APP_TIMEZONE in functions.php) for NOW(), CURDATE() and timestamps
+$pdo->exec("SET time_zone = '" . date('P') . "'");
+
 // Upgrades an existing database automatically the first time this version runs,
 // so you do NOT need to import anything into phpMyAdmin for an existing database.
 // (A brand-new database can simply import intern_track_db.sql.)

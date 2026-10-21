@@ -13,6 +13,13 @@ const STATUS_CLS = [
     'Completed' => 'bg-blue-100 text-figmaBlue',
 ];
 
+// Philippine time for PHP and MySQL alike (db.php sets MySQL to match), so "today" means the same to both.
+// XAMPP's php.ini defaults to Europe/Berlin, which put PHP's date 6 to 7 hours behind the database.
+const APP_TIMEZONE = 'Asia/Manila';
+date_default_timezone_set(APP_TIMEZONE);
+
+const IDLE_TIMEOUT = 30 * 60; // seconds without activity before a signed-in user is signed out automatically
+
 // ---------------------------------------------------------------------------
 // Resume upload storage.
 // Default: two levels above the XAMPP htdocs folder so that, on a standard
@@ -92,30 +99,39 @@ const PERMISSION_GROUPS = [
     ],
 ];
 
-/** Audit log activity types: key => [category, label, badge colour]. */
+/** Audit log filter groups (the category buttons on the Audit Logs page). */
+const AUDIT_CATEGORIES = [
+    'signin'     => 'Sign-ins',
+    'security'   => 'Security alerts',
+    'records'    => 'Intern records',
+    'validation' => 'Registrations',
+    'accounts'   => 'Accounts & settings',
+];
+
+/** Audit log activity types: key => [category, label, badge colour, what the person did (follows their name)]. */
 const AUDIT_ACTIONS = [
-    'login'                  => ['Authentication', 'Sign-in',                      'green'],
-    'login_failed'           => ['Authentication', 'Failed sign-in',               'red'],
-    'logout'                 => ['Authentication', 'Sign-out',                     'gray'],
-    'intern_added'           => ['Intern Records', 'Intern added',                 'blue'],
-    'intern_edited'          => ['Intern Records', 'Intern record edited',         'blue'],
-    'intern_deleted'         => ['Intern Records', 'Intern record deleted',        'red'],
-    'registration_submitted' => ['Validation',     'Registration submitted',       'yellow'],
-    'validation_approved'    => ['Validation',     'Submission approved',          'green'],
-    'validation_rejected'    => ['Validation',     'Submission rejected',          'red'],
-    'validation_edited'      => ['Validation',     'Submission edited',            'blue'],
-    'validation_reopened'    => ['Validation',     'Returned to pending',          'yellow'],
-    'validation_deleted'     => ['Validation',     'Submission deleted',           'red'],
-    'resume_uploaded'        => ['Validation',     'Resume uploaded',              'blue'],
-    'resume_viewed'          => ['Validation',     'Resume viewed',                'gray'],
-    'profile_updated'        => ['Settings',       'Profile updated',              'blue'],
-    'password_changed'       => ['Settings',       'Password changed',             'blue'],
-    'registration_toggled'   => ['Settings',       'Registration setting changed', 'yellow'],
-    'access_denied'          => ['Security',       'Access denied',                'red'],
-    'user_created'           => ['Accounts',       'Account created',              'green'],
-    'user_updated'           => ['Accounts',       'Account updated',              'blue'],
-    'user_deleted'           => ['Accounts',       'Account deleted',              'red'],
-    'password_reset'         => ['Accounts',       'Password reset',               'yellow'],
+    'login'                  => ['signin',     'Sign-in',                      'green',  'signed in'],
+    'logout'                 => ['signin',     'Sign-out',                     'gray',   'signed out'],
+    'login_failed'           => ['security',   'Failed sign-in',               'red',    'failed to sign in'],
+    'access_denied'          => ['security',   'Access denied',                'red',    'was blocked from a restricted action'],
+    'intern_added'           => ['records',    'Intern added',                 'blue',   'added an intern record'],
+    'intern_edited'          => ['records',    'Intern record edited',         'blue',   'edited an intern record'],
+    'intern_deleted'         => ['records',    'Intern record deleted',        'red',    'deleted an intern record'],
+    'registration_submitted' => ['validation', 'Registration submitted',       'yellow', 'submitted a registration'],
+    'validation_approved'    => ['validation', 'Submission approved',          'green',  'approved a registration'],
+    'validation_rejected'    => ['validation', 'Submission rejected',          'red',    'rejected a registration'],
+    'validation_edited'      => ['validation', 'Submission edited',            'blue',   'edited a registration'],
+    'validation_reopened'    => ['validation', 'Returned to pending',          'yellow', 'returned a registration to pending'],
+    'validation_deleted'     => ['validation', 'Submission deleted',           'red',    'deleted a registration'],
+    'resume_uploaded'        => ['validation', 'Resume uploaded',              'blue',   'uploaded a resume'],
+    'resume_viewed'          => ['validation', 'Resume viewed',                'gray',   'viewed a resume'],
+    'profile_updated'        => ['accounts',   'Profile updated',              'blue',   'updated their profile'],
+    'password_changed'       => ['accounts',   'Password changed',             'blue',   'changed their password'],
+    'registration_toggled'   => ['accounts',   'Registration setting changed', 'yellow', 'changed the registration setting'],
+    'user_created'           => ['accounts',   'Account created',              'green',  'created an account'],
+    'user_updated'           => ['accounts',   'Account updated',              'blue',   'updated an account'],
+    'user_deleted'           => ['accounts',   'Account deleted',              'red',    'deleted an account'],
+    'user_password_reset'    => ['accounts',   'Password reset',               'yellow', "reset an account's password"],
 ];
 const BADGE_CLS = [
     'green'  => 'bg-green-100 text-green-700',
@@ -165,6 +181,67 @@ function csrf_verify(): void {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Security code (CAPTCHA) for the public sign-in and registration forms */
+/* ------------------------------------------------------------------ */
+
+const CAPTCHA_FORMS  = ['login', 'register'];
+const CAPTCHA_CHARS  = 'abcdefghkmnprstuvwxyz'; // i, j, l, o and q are left out because they are easily misread
+const CAPTCHA_LENGTH = 5;
+const CAPTCHA_TTL    = 600; // seconds a code stays valid
+
+/** Creates a new code for the form and keeps it in the session (captcha.php calls this each time the picture loads). */
+function captcha_new(string $form): string {
+    $code = '';
+    for ($i = 0; $i < CAPTCHA_LENGTH; $i++) {
+        $code .= CAPTCHA_CHARS[random_int(0, strlen(CAPTCHA_CHARS) - 1)];
+    }
+    $_SESSION['captcha'][$form] = ['code' => $code, 'at' => time()];
+    return $code;
+}
+
+/** Checks the typed code (not case-sensitive). Each code allows one attempt only, so it cannot be guessed repeatedly. */
+function captcha_verify(string $form, string $answer): bool {
+    $saved = $_SESSION['captcha'][$form] ?? null;
+    unset($_SESSION['captcha'][$form]);
+    if (!$saved || time() - $saved['at'] > CAPTCHA_TTL) { return false; }
+    return hash_equals($saved['code'], strtolower(preg_replace('/\s+/', '', $answer)));
+}
+
+/** Prints the security-code box: the code picture, a button for a new code, and the answer field. */
+function captcha_box(string $form, bool $invalid = false, string $labelCls = LABEL_CLS): void {
+    $id  = 'captcha_' . $form;
+    $src = 'captcha.php?for=' . $form . '&t=' . bin2hex(random_bytes(4)); // a fresh address, so the browser never shows an old picture
+    ?>
+    <div>
+        <label class="<?= $labelCls ?>" for="<?= $id ?>">SECURITY CHECK</label>
+        <div class="overflow-hidden rounded border bg-white <?= $invalid ? 'border-red-500 ring-1 ring-red-500' : 'border-gray-300 focus-within:border-figmaBlue focus-within:ring-1 focus-within:ring-figmaBlue' ?>">
+            <div class="flex">
+                <img id="<?= $id ?>_img" src="<?= e($src) ?>" width="720" height="104" draggable="false"
+                     alt="Security code picture. Type the letters it shows, or select New code to get a different one."
+                     class="block h-auto min-w-0 flex-1 select-none">
+                <button type="button" id="<?= $id ?>_new" title="Show a different code" aria-label="New code"
+                        class="flex w-12 shrink-0 items-center justify-center border-l border-gray-300 bg-gray-50 text-figmaBlue transition hover:bg-blue-50 focus:outline-none focus-visible:bg-blue-100">
+                    <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                </button>
+            </div>
+            <input type="text" id="<?= $id ?>" name="captcha" required maxlength="12" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                   placeholder="Type the letters shown above" aria-describedby="<?= $id ?>_hint"<?= $invalid ? ' aria-invalid="true"' : '' ?>
+                   class="block w-full border-0 border-t border-gray-300 px-4 py-3 text-center text-base font-bold lowercase tracking-[0.3em] text-gray-800 placeholder:text-sm placeholder:font-semibold placeholder:normal-case placeholder:tracking-normal placeholder:text-gray-400 focus:outline-none">
+        </div>
+        <p id="<?= $id ?>_hint" class="mt-1 text-[11px] text-gray-400">Letters only, not case-sensitive. Hard to read? Select &#8635; for a new code.</p>
+    </div>
+    <script>
+        document.getElementById('<?= $id ?>_new').addEventListener('click', function () {
+            document.getElementById('<?= $id ?>_img').src = 'captcha.php?for=<?= $form ?>&t=' + Date.now();
+            var field = document.getElementById('<?= $id ?>');
+            field.value = '';
+            field.focus();
+        });
+    </script>
+    <?php
+}
+
 /* One-time messages shown after a redirect */
 function flash(string $type, string $msg): void { $_SESSION['flash'][] = [$type, $msg]; }
 function flash_html(): string {
@@ -211,6 +288,13 @@ function require_login(): void {
         session_destroy();
         redirect('login.php?reason=deactivated');
     }
+    // Automatic sign-out after a period without activity (page loads and keepalive.php count as activity)
+    if (time() - ($_SESSION['last_activity'] ?? time()) > IDLE_TIMEOUT) {
+        session_unset();
+        session_destroy();
+        redirect('login.php?reason=idle');
+    }
+    $_SESSION['last_activity'] = time();
 }
 
 function can(string $permission): bool {
@@ -1104,6 +1188,46 @@ function page_start(PDO $pdo, string $title, string $active): void {
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = { theme: { extend: { colors: { figmaBg: '#F5F6F8', figmaBlue: '#15458A', figmaYellow: '#FDDB31' } } } }
+    </script>
+    <script>
+        // Automatic sign-out: after IDLE_TIMEOUT with no mouse, keyboard, scroll or touch activity in any InternTrack tab,
+        // the person is signed out, with a warning during the last minute. While they are active, a light keep-alive
+        // (at most once a minute) tells the server, so someone reading a page or filling in a long form stays signed in.
+        (function () {
+            var LIMIT = <?= IDLE_TIMEOUT * 1000 ?>, KEY = 'interntrack.lastActive';
+            var mine = Date.now(), lastSaved = 0, lastPing = mine, box = null;
+            function shared() { try { return +localStorage.getItem(KEY) || 0; } catch (e) { return 0; } }
+            function warn(text) {
+                if (!text) { if (box) { box.remove(); box = null; } return; }
+                if (!box) {
+                    box = document.createElement('div');
+                    box.setAttribute('role', 'status');
+                    box.className = 'fixed bottom-6 right-6 z-[80] max-w-sm rounded-lg border border-yellow-300 bg-yellow-50 p-4 text-sm text-yellow-900 shadow-xl';
+                    document.body.appendChild(box);
+                }
+                box.textContent = text;
+            }
+            function active() {
+                mine = Date.now();
+                if (box) { warn(''); }
+                if (mine - lastSaved > 5000) { lastSaved = mine; try { localStorage.setItem(KEY, mine); } catch (e) {} }
+                if (mine - lastPing > 60000) {
+                    lastPing = mine;
+                    fetch('keepalive.php', { cache: 'no-store' })
+                        .then(function (r) { if (r.redirected) { location.href = r.url; } }) // already signed out: show the sign-in page
+                        .catch(function () {});
+                }
+            }
+            active();
+            ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'wheel'].forEach(function (ev) {
+                document.addEventListener(ev, active, { capture: true, passive: true });
+            });
+            setInterval(function () {
+                var left = LIMIT - (Date.now() - Math.max(mine, shared()));
+                if (left <= 0) { location.href = 'logout.php?reason=idle'; return; }
+                warn(left <= 60000 ? 'For your security, you will be signed out in ' + Math.ceil(left / 1000) + ' seconds because there has been no activity. Move the mouse or press any key to stay signed in.' : '');
+            }, 5000);
+        })();
     </script>
 </head>
 <body class="flex h-screen bg-figmaBg font-sans overflow-hidden">

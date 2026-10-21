@@ -3,10 +3,13 @@ session_start();
 require_once 'db.php'; // Database connection and shared helpers
 
 $error_message = '';
+$captcha_error = false;
 $notice = '';
 
 if (($_GET['reason'] ?? '') === 'deactivated') {
     $notice = 'Your session has ended because your account is no longer active. Please contact a Super Admin.';
+} elseif (($_GET['reason'] ?? '') === 'idle') {
+    $notice = 'For your security, you were signed out after ' . (IDLE_TIMEOUT / 60) . ' minutes without activity. Please sign in again.';
 } elseif (isset($_GET['loggedout'])) {
     $notice = 'You have been signed out successfully.';
 }
@@ -15,7 +18,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $username = trim($_POST['username'] ?? '');
     $password = trim($_POST['password'] ?? '');
 
-    if ($username !== '' && $password !== '') {
+    if ($username === '' || $password === '') {
+        $error_message = "Please enter both your username and password.";
+
+    } elseif (!captcha_verify('login', (string)($_POST['captcha'] ?? ''))) {
+        // Checked before the account lookup, so automated password guessing never gets that far
+        $captcha_error = true;
+        $error_message = "The security code did not match. Please enter your password again and type the new code shown below.";
+
+    } else {
         // Prepared statement to prevent SQL injection
         $stmt = $pdo->prepare("SELECT id, username, password_hash, `role`, is_active FROM users WHERE username = :username");
         $stmt->execute(['username' => $username]);
@@ -38,6 +49,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             $_SESSION['loggedin'] = true;
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['username'] = $user['username'];
+            $_SESSION['last_activity'] = time(); // starts the idle timer (see require_login)
 
             $pdo->prepare("UPDATE users SET last_login_at = NOW() WHERE id = ?")->execute([$user['id']]);
             audit_log($pdo, 'login', 'Signed in successfully.', $user);
@@ -45,8 +57,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             header("Location: dashboard.php");
             exit;
         }
-    } else {
-        $error_message = "Please enter both your username and password.";
     }
 }
 ?>
@@ -122,12 +132,13 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         <form method="POST" action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" class="space-y-6">
           <div>
             <label class="mb-2 block text-xs font-bold text-figmaDark" for="username">USERNAME</label>
-            <input type="text" id="username" name="username" placeholder="Enter your username" required autocomplete="username" class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+            <input type="text" id="username" name="username" value="<?php echo e(trim($_POST['username'] ?? '')); ?>" placeholder="Enter your username" required autocomplete="username" class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
           </div>
           <div>
             <label class="mb-2 block text-xs font-bold text-figmaDark" for="password">PASSWORD</label>
             <input type="password" id="password" name="password" placeholder="Enter your password" required autocomplete="current-password" class="w-full rounded border border-gray-300 px-4 py-3 text-sm focus:border-figmaBlue focus:outline-none focus:ring-1 focus:ring-figmaBlue">
           </div>
+          <?php captcha_box('login', $captcha_error, 'mb-2 block text-xs font-bold text-figmaDark'); ?>
           <button type="submit" class="mt-2 flex w-full items-center justify-center gap-2 rounded bg-figmaBlue px-4 py-3 text-sm font-bold text-white transition hover:bg-blue-900 shadow-md">
             SIGN IN &rarr;
           </button>
