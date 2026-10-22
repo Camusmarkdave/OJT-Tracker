@@ -182,12 +182,12 @@ function csrf_verify(): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* Security code (CAPTCHA) for the public sign-in and registration forms */
+/* Security code (CAPTCHA) for the sign-in form                        */
 /* ------------------------------------------------------------------ */
 
-const CAPTCHA_FORMS  = ['login', 'register'];
+const CAPTCHA_FORMS  = ['login'];
 const CAPTCHA_CHARS  = 'abcdefghkmnprstuvwxyz'; // i, j, l, o and q are left out because they are easily misread
-const CAPTCHA_LENGTH = 5;
+const CAPTCHA_LENGTH = 3;
 const CAPTCHA_TTL    = 600; // seconds a code stays valid
 
 /** Creates a new code for the form and keeps it in the session (captcha.php calls this each time the picture loads). */

@@ -1,6 +1,6 @@
 <?php
 /**
- * captcha.php?for=login|register
+ * captcha.php?for=login
  * Draws a new security code as a PNG picture: shaded vertical bars with tilted letters on top.
  * The code itself is kept in the session (see captcha_new and captcha_verify in functions.php).
  *
@@ -19,8 +19,8 @@ session_write_close(); // the code is saved; free the session while the picture 
 
 const W   = 720;  // picture size in pixels (shown smaller on the page, so it stays sharp)
 const H   = 104;
-const S   = 4.0;  // letter grid unit, in pixels
-const PEN = 4.1;  // half the thickness of the letter strokes, in pixels
+const S   = 4.6;  // letter grid unit, in pixels
+const PEN = 4.5;  // half the thickness of the letter strokes, in pixels
 
 // Bar shades, light to dark (InternTrack blue)
 const BAR_COLOURS = [
@@ -193,7 +193,7 @@ foreach (str_split($code) as $ch) {
     unset($pts);
 
     $letters[] = ['lines' => $lines, 'x' => $cursor - $minX, 'y' => H / 2 + rnd(-8, 8)];
-    $gap = rnd(26, 50);
+    $gap = rnd(44, 80); // wide gaps spread the few letters across the picture
     $cursor += $maxX - $minX + $gap;
 }
 

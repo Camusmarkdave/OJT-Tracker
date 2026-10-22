@@ -9,7 +9,6 @@ $submitted = isset($_GET['submitted']);
 $errors    = [];
 $old       = [];
 $resumeHint = ''; // non-empty when the user must reselect the file after a validation error
-$captchaError = false;
 $regMode   = ($_POST['reg_mode'] ?? 'resume') === 'manual' ? 'manual' : 'resume';
 
 // ---------------------------------------------------------------------------
@@ -85,11 +84,6 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (!empty($_POST['website'])) { // honeypot: genuine users never complete this hidden field
             redirect('register.php?submitted=1');
-        }
-
-        if (!captcha_verify('register', (string)($_POST['captcha'] ?? ''))) {
-            $captchaError = true;
-            $errors[] = 'The security code did not match. Please type the new code shown in the Security Check box.';
         }
 
         $old = clean_intern_input($_POST);
@@ -324,8 +318,6 @@ if ($open && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     <input type="checkbox" required class="mt-0.5 h-4 w-4 accent-[#15458A]">
                     <span>I certify that the information provided is accurate and complete, and I understand that it will be reviewed by the HR Department before it is accepted. Any resume I attach will be stored securely and reviewed by HR.</span>
                 </label>
-
-                <?php captcha_box('register', $captchaError); ?>
 
                 <div class="flex items-center justify-between border-t border-gray-200 pt-4">
                     <a href="login.php" class="text-xs font-bold text-gray-500 hover:text-figmaBlue">&larr; Return to sign in</a>
