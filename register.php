@@ -17,58 +17,7 @@ $regMode   = ($_POST['reg_mode'] ?? 'resume') === 'manual' ? 'manual' : 'resume'
 if ($open && ($_GET['action'] ?? '') === 'parse_resume' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json; charset=UTF-8');
     csrf_verify();
-
-    if (!isset($_FILES['resume']) || $_FILES['resume']['error'] !== UPLOAD_ERR_OK) {
-        $msg = 'Please select a valid PDF file.';
-        if (isset($_FILES['resume']['error']) && ($_FILES['resume']['error'] === UPLOAD_ERR_INI_SIZE || $_FILES['resume']['error'] === UPLOAD_ERR_FORM_SIZE)) {
-            $msg = 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
-        }
-        echo json_encode(['success' => false, 'message' => $msg]);
-        exit;
-    }
-    $f = $_FILES['resume'];
-    if ($f['size'] > RESUME_MAX_BYTES) {
-        echo json_encode(['success' => false, 'message' => 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.']);
-        exit;
-    }
-    $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
-    if ($ext !== 'pdf') {
-        echo json_encode(['success' => false, 'message' => 'Only PDF files are accepted for the resume.']);
-        exit;
-    }
-    $finfo = new finfo(FILEINFO_MIME_TYPE);
-    if ($finfo->file($f['tmp_name']) !== 'application/pdf') {
-        echo json_encode(['success' => false, 'message' => 'The uploaded file does not appear to be a valid PDF document.']);
-        exit;
-    }
-    $handle = fopen($f['tmp_name'], 'rb');
-    $magic  = fread($handle, 4);
-    fclose($handle);
-    if ($magic !== '%PDF') {
-        echo json_encode(['success' => false, 'message' => 'The uploaded file does not appear to be a valid PDF document.']);
-        exit;
-    }
-
-    $text = extract_pdf_text($f['tmp_name']);
-    if ($text === null || trim($text) === '') {
-        echo json_encode([
-            'success'  => false,
-            'readable' => false,
-            'message'  => 'No readable text was detected in the PDF (it may be a scanned document). Please fill in your details below.'
-        ]);
-        exit;
-    }
-
-    $parsed = parse_resume_data($text, $pdo);
-    $foundCount = count(array_filter($parsed));
-    echo json_encode([
-        'success'  => true,
-        'readable' => true,
-        'data'     => $parsed,
-        'message'  => $foundCount > 0
-            ? 'Information extracted from your resume and pre-filled below. Please review and verify the details.'
-            : 'Resume uploaded. Specific details could not be detected automatically; please fill in the fields below.'
-    ]);
+    echo json_encode(resume_autofill($pdo, $_FILES['resume'] ?? null)); // shared with the Add Intern form on the dashboard
     exit;
 }
 

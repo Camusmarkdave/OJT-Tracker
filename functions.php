@@ -846,6 +846,51 @@ function parse_resume_data(string $text, PDO $pdo): array {
     ];
 }
 
+/** Checks an uploaded resume: it must be a real PDF within the size limit. Returns an error message, or null when it is fine. */
+function resume_upload_error(?array $file): ?string {
+    if (!$file || !is_int($file['error'] ?? null) || $file['error'] === UPLOAD_ERR_NO_FILE) {
+        return 'Please select a PDF resume file.';
+    }
+    if ($file['error'] === UPLOAD_ERR_INI_SIZE || $file['error'] === UPLOAD_ERR_FORM_SIZE || $file['size'] > RESUME_MAX_BYTES) {
+        return 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+    }
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        return 'The resume file could not be uploaded. Please try again.';
+    }
+    if (strtolower(pathinfo($file['name'], PATHINFO_EXTENSION)) !== 'pdf') {
+        return 'Only PDF files are accepted for the resume. Please select a file with a .pdf extension.';
+    }
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $handle = fopen($file['tmp_name'], 'rb');
+    $magic = fread($handle, 4);
+    fclose($handle);
+    if ($finfo->file($file['tmp_name']) !== 'application/pdf' || $magic !== '%PDF') {
+        return 'The uploaded file does not appear to be a valid PDF document.';
+    }
+    return null;
+}
+
+/**
+ * Reads an uploaded resume and picks out the name, school and course, so a form can be filled in automatically.
+ * The registration form and the Add Intern form both use this, so they behave the same.
+ * Returns ['valid' => usable PDF?, 'success' => details read?, 'data' => [field => value], 'message' => text to show].
+ */
+function resume_autofill(PDO $pdo, ?array $file): array {
+    if ($err = resume_upload_error($file)) {
+        return ['valid' => false, 'success' => false, 'data' => [], 'message' => $err];
+    }
+    $text = extract_pdf_text($file['tmp_name']);
+    if ($text === null || trim($text) === '') {
+        return ['valid' => true, 'success' => false, 'data' => [],
+                'message' => 'No readable text was detected in the PDF (it may be a scanned document). Please fill in the details below.'];
+    }
+    $data = parse_resume_data($text, $pdo);
+    return ['valid' => true, 'success' => true, 'data' => $data,
+            'message' => array_filter($data)
+                ? 'Information extracted from the resume and pre-filled below. Please review and verify the details.'
+                : 'The resume was read, but specific details could not be detected automatically. Please fill in the fields below.'];
+}
+
 /**
  * Saves or replaces the resume file for an intern record.
  * Handles validation, deleting any old file, moving the file, extracting text,
@@ -853,30 +898,10 @@ function parse_resume_data(string $text, PDO $pdo): array {
  * Returns null on success, or an error message string on failure.
  */
 function save_intern_resume(PDO $pdo, int $id, array $file): ?string {
-    if ($file['error'] !== UPLOAD_ERR_OK) {
-        if ($file['error'] === UPLOAD_ERR_INI_SIZE || $file['error'] === UPLOAD_ERR_FORM_SIZE) {
-            return 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
-        }
-        return 'The resume file could not be uploaded. Please try again.';
-    }
-    if ($file['size'] > RESUME_MAX_BYTES) {
-        return 'The resume file exceeds the maximum allowed size of ' . (RESUME_MAX_BYTES / 1024 / 1024) . ' MB.';
+    if ($err = resume_upload_error($file)) {
+        return $err;
     }
     $origName = $file['name'];
-    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
-    if ($ext !== 'pdf') {
-        return 'Only PDF files are accepted for the resume. Please select a file with a .pdf extension.';
-    }
-    $finfo = new finfo(FILEINFO_MIME_TYPE);
-    if ($finfo->file($file['tmp_name']) !== 'application/pdf') {
-        return 'The uploaded file does not appear to be a valid PDF document.';
-    }
-    $handle = fopen($file['tmp_name'], 'rb');
-    $magic = fread($handle, 4);
-    fclose($handle);
-    if ($magic !== '%PDF') {
-        return 'The uploaded file does not appear to be a valid PDF document.';
-    }
 
     $st = $pdo->prepare("SELECT * FROM interns WHERE id = ?");
     $st->execute([$id]);

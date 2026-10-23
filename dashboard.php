@@ -4,11 +4,22 @@ require_once 'db.php';
 require_login(); // Security check
 require_permission('records.view');
 
+// Add Intern form: reads the selected resume and returns the details found in it (same as the registration form)
+if (($_GET['action'] ?? '') === 'parse_resume' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json; charset=UTF-8');
+    csrf_verify();
+    require_permission('records.add');
+    echo json_encode(resume_autofill($pdo, $_FILES['resume'] ?? null));
+    exit;
+}
+
 $canAdd    = can('records.add');
 $canEdit   = can('records.edit');
 $canDelete = can('records.delete'); // Super Admin only
 
 $addErrors = [];
+$addMode = 'resume';     // Add Intern: 'resume' (details read from the PDF) or 'manual'
+$addResumeHint = '';     // shown when the resume must be selected again after an error
 $editErrors = [];
 $old = [];
 $openModal = '';
@@ -21,12 +32,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'add_intern') {
         require_permission('records.add');
         $old = clean_intern_input($_POST);
-        $addErrors = validate_intern($old);
+        $addMode = ($_POST['add_mode'] ?? 'resume') === 'manual' ? 'manual' : 'resume';
+        $resume = $_FILES['resume'] ?? null;
+
+        // "Upload resume": the same check and reading as the registration form; any detail left empty is taken from the resume
+        if ($addMode === 'resume') {
+            $read = resume_autofill($pdo, $resume);
+            if (!$read['valid']) { $addErrors[] = $read['message']; }
+            foreach (['first_name', 'last_name', 'school', 'course'] as $k) {
+                if ($old[$k] === '' && !empty($read['data'][$k])) { $old[$k] = $read['data'][$k]; }
+            }
+        }
+        $addErrors = array_merge($addErrors, validate_intern($old));
+
         if (!$addErrors) {
+            // The record and its resume are saved together: if the resume cannot be stored, the record is not added either
+            $pdo->beginTransaction();
             insert_intern($pdo, $old, 'Approved', 'admin');
+            $id = (int)$pdo->lastInsertId(); // read before audit_log, which inserts a row of its own
             audit_log($pdo, 'intern_added', 'Added intern record: ' . intern_summary($old) . '.');
-            flash('success', 'The intern record for ' . $old['first_name'] . ' ' . $old['last_name'] . ' was added successfully.');
-            redirect('dashboard.php');
+            $resumeErr = $addMode === 'resume' ? save_intern_resume($pdo, $id, $resume) : null;
+            if ($resumeErr === null) {
+                $pdo->commit();
+                flash('success', 'The intern record for ' . $old['first_name'] . ' ' . $old['last_name'] . ' was added successfully' . ($addMode === 'resume' ? ', with the resume attached.' : '.'));
+                redirect('dashboard.php');
+            }
+            $pdo->rollBack();
+            $addErrors[] = $resumeErr;
+        }
+        if ($addMode === 'resume' && $resume && $resume['error'] !== UPLOAD_ERR_NO_FILE) {
+            $addResumeHint = 'The resume you selected was not kept. Please select it again before saving.';
         }
         $openModal = 'add';
 
@@ -318,9 +353,32 @@ page_start($pdo, 'Intern Records', 'dashboard');
             <button onclick="closeModal()" aria-label="Close" class="text-gray-400 hover:text-gray-600 font-bold text-xl">&times;</button>
         </div>
 
-        <form method="POST" action="dashboard.php" <?php echo form_attrs(); ?> class="space-y-4">
+        <form method="POST" action="dashboard.php" enctype="multipart/form-data" <?php echo form_attrs(); ?> class="space-y-4">
             <?php echo csrf_field(); ?>
             <input type="hidden" name="action" value="add_intern">
+
+            <!-- How to add the intern: from their resume (details filled in automatically) or by typing everything -->
+            <div class="grid grid-cols-2 gap-3">
+                <?php foreach (['resume' => ['Upload resume', "Fills in the details from the intern's PDF"], 'manual' => ['Fill in manually', 'Type the details; no resume file']] as $mode => [$title, $hint]): $on = $addMode === $mode; ?>
+                <label id="add_mode_<?php echo $mode; ?>_card" class="flex cursor-pointer items-center gap-3 rounded-md border-2 bg-white p-3 shadow-sm transition hover:border-figmaBlue <?php echo $on ? 'border-figmaBlue ring-1 ring-figmaBlue' : 'border-gray-200'; ?>">
+                    <input type="radio" name="add_mode" value="<?php echo $mode; ?>" id="add_mode_<?php echo $mode; ?>" class="h-4 w-4 accent-figmaBlue" <?php echo $on ? 'checked' : ''; ?> onchange="toggleAddMode()">
+                    <span>
+                        <span class="block text-sm font-bold text-gray-900"><?php echo $title; ?></span>
+                        <span class="block text-[11px] text-gray-500"><?php echo e($hint); ?></span>
+                    </span>
+                </label>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Resume ("Upload resume" only): selecting it fills in the name, school and course below -->
+            <div id="add_resume_section" class="<?php echo $addMode === 'manual' ? 'hidden' : ''; ?> rounded-lg border border-blue-100 bg-blue-50/40 p-4">
+                <label class="<?php echo LABEL_CLS; ?>" for="add_resume">INTERN'S RESUME * (PDF ONLY, MAX <?php echo RESUME_MAX_BYTES / 1024 / 1024; ?> MB)</label>
+                <input type="file" name="resume" id="add_resume" accept=".pdf,application/pdf" <?php echo $addMode === 'resume' ? 'required' : 'disabled'; ?>
+                    class="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-figmaBlue file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-white hover:file:bg-blue-900 focus:outline-none focus:ring-1 focus:ring-figmaBlue">
+                <?php if ($addResumeHint): ?><p class="mt-1 text-xs font-medium text-yellow-700"><?php echo e($addResumeHint); ?></p><?php endif; ?>
+                <div id="add_resume_status" class="mt-2 hidden text-xs font-medium"></div>
+                <p class="mt-1 text-[11px] text-gray-500">The name, school, and course are read from the PDF and filled in below. Then add the department and internship dates.</p>
+            </div>
 
             <?php intern_fields($pdo, 'add_', $openModal === 'add' ? $old : [], ['errors' => $addErrors]); ?>
 
@@ -388,6 +446,56 @@ page_start($pdo, 'Intern Records', 'dashboard');
     function closeModal() {
         document.getElementById('addInternModal').classList.add('hidden');
     }
+
+    /* ---------- Add Intern: upload the resume to fill in the details (same as the registration form) ---------- */
+    function toggleAddMode() {
+        const useResume = document.getElementById('add_mode_resume').checked;
+        const file = document.getElementById('add_resume');
+        document.getElementById('add_resume_section').classList.toggle('hidden', !useResume);
+        file.required = useResume;
+        file.disabled = !useResume;
+        if (!useResume) { file.value = ''; showResumeStatus(''); }
+        [['add_mode_resume_card', useResume], ['add_mode_manual_card', !useResume]].forEach(([id, on]) => {
+            const card = document.getElementById(id);
+            ['border-figmaBlue', 'ring-1', 'ring-figmaBlue'].forEach(c => card.classList.toggle(c, on));
+            card.classList.toggle('border-gray-200', !on);
+        });
+    }
+
+    function showResumeStatus(text, tone) {
+        const box = document.getElementById('add_resume_status');
+        const tones = {
+            busy: 'text-figmaBlue',
+            ok:   'rounded border border-green-200 bg-green-50 p-2 text-green-700',
+            warn: 'rounded border border-yellow-200 bg-yellow-50 p-2 text-yellow-800',
+        };
+        box.textContent = text;
+        box.className = 'mt-2 text-xs font-medium ' + (tones[tone] || '') + (text ? '' : ' hidden');
+    }
+
+    // Selecting a resume sends it to the server, which reads the name, school and course from it
+    document.getElementById('add_resume')?.addEventListener('change', async function () {
+        const file = this.files && this.files[0];
+        if (!file) { showResumeStatus(''); return; }
+        showResumeStatus('Reading the resume...', 'busy');
+        const body = new FormData();
+        body.append('resume', file);
+        body.append('csrf', this.form.querySelector('input[name="csrf"]').value);
+        try {
+            const json = await (await fetch('dashboard.php?action=parse_resume', { method: 'POST', body })).json();
+            if (json.success) {
+                ['first_name', 'last_name', 'school', 'course'].forEach(k => {
+                    const el = document.getElementById('add_' + k);
+                    if (el && json.data[k]) el.value = json.data[k];
+                });
+                const dept = document.getElementById('add_department');
+                if (dept && !dept.value) dept.focus(); // the next thing HR has to fill in
+            }
+            showResumeStatus(json.message, json.success ? 'ok' : 'warn');
+        } catch (err) {
+            showResumeStatus('The details could not be read automatically. Please fill in the fields below.', 'warn');
+        }
+    });
 
     function openEditModal(intern, keepErrors) {
         const modal = document.getElementById('editInternModal');
@@ -506,6 +614,7 @@ page_start($pdo, 'Intern Records', 'dashboard');
     document.addEventListener('DOMContentLoaded', () => {
         renderTable();
         updateClearButton();
+        if (document.getElementById('add_mode_resume')) toggleAddMode(); // matches the form if the browser restored an earlier choice
         <?php if ($openModal === 'add'): ?>
         openModal();
         <?php elseif ($openModal === 'edit'): ?>
